@@ -250,9 +250,6 @@ def main():
     used_set = set(str(x) for x in used)
 
     track = pick_track(used_set)
-    if not track:
-        print("⛔ آهنگِ آزادِ تازه‌ای پیدا نشد. فردا دوباره.")
-        return
 
     # دانلود
     try:
