@@ -26,18 +26,18 @@ BACKUP_CHANNEL = "@analyzeAisTrb"       # کانالِ گزارشِ فنی
 FOOTER         = "\n\n@RadioBulletin | رادیو بولتن"
 ALBUM_BRAND    = "رادیو بولتن | @RadioBulletin"   # در فیلدِ آلبومِ فایل می‌نشیند (برندینگ)
 
-# مودهای احساسی؛ هر شب یکی به‌صورتِ تصادفی انتخاب می‌شود تا تنوع داشته باشیم
-MOOD_TAGS = ["emotional", "melancholic", "sad", "love", "romantic",
-             "nostalgic", "piano", "acoustic", "ambient", "cinematic",
-             "soul", "chillout", "dream", "relaxing"]
+# مودهای احساسی و عامه‌پسند (ترجیحاً باکلام)؛ هر شب یکی تصادفی برای تنوع
+MOOD_TAGS = ["pop", "love", "romantic", "emotional", "soul",
+             "rnb", "acoustic", "singersongwriter", "indiepop",
+             "ballad", "melancholic", "happy"]
 
 # ===================== ثابت‌ها =====================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 JAMENDO_CLIENT_ID  = os.environ.get("JAMENDO_CLIENT_ID", "")
 GITHUB_TOKEN       = os.environ.get("GITHUB_TOKEN", "")
 
-AI_MODEL       = "openai/gpt-4.1"
-AI_MODEL_CHAIN = [AI_MODEL, "openai/gpt-4o", "openai/gpt-4o-mini"]
+AI_MODEL       = "openai/gpt-5"        # بهترین مدل برای داستان؛ یک‌بار در روز راحت جا می‌شود
+AI_MODEL_CHAIN = [AI_MODEL, "openai/gpt-4.1", "openai/gpt-4o", "openai/gpt-4o-mini"]
 AI_ENDPOINT    = "https://models.github.ai/inference/chat/completions"
 
 JAMENDO_API = "https://api.jamendo.com/v3.0/tracks"
@@ -76,6 +76,7 @@ def jamendo_fetch(tag, limit=50):
         "limit": limit,
         "tags": tag,
         "order": "popularity_total",
+        "vocalinstrumental": "vocal",      # ترجیحاً باکلام (نه بی‌کلام)
         "include": "musicinfo licenses",   # requests فاصله را به + تبدیل می‌کند
         "audiodownload_allowed": "true",
     }
@@ -85,26 +86,35 @@ def jamendo_fetch(tag, limit=50):
     return data.get("results", []) or []
 
 
+def _is_persian(t):
+    lang = str(((t.get("musicinfo") or {}).get("lang") or "")).lower()
+    return lang in ("fa", "fas", "per", "persian")
+
+
 def pick_track(used_ids):
-    """چند مودِ تصادفی را امتحان می‌کند تا یک آهنگِ تکراری‌نشده و قابلِ‌دانلود پیدا کند."""
+    """یک آهنگِ باکلامِ تکراری‌نشده پیدا می‌کند؛ اگر فارسی بود اولویت دارد،
+    وگرنه از بینِ محبوب‌ترین‌ها (که عامه‌پسندترند) یکی انتخاب می‌کند."""
     tags = MOOD_TAGS[:]
     random.shuffle(tags)
-    for tag in tags[:5]:
+    for tag in tags[:6]:
         try:
             results = jamendo_fetch(tag)
         except Exception as e:
             print(f"  ⚠️ خطا در گرفتنِ آهنگ‌های مودِ «{tag}»:", e)
             continue
-        random.shuffle(results)
-        for t in results:
-            tid = str(t.get("id", ""))
-            if not tid or tid in used_ids:
-                continue
-            if not t.get("audiodownload"):
-                continue
-            t["_mood"] = tag
-            print(f"  🎯 انتخاب شد: «{t.get('name')}» از «{t.get('artist_name')}» (مود: {tag})")
-            return t
+        valid = [t for t in results
+                 if str(t.get("id", "")) and str(t.get("id")) not in used_ids
+                 and t.get("audiodownload")]
+        if not valid:
+            continue
+        persian = [t for t in valid if _is_persian(t)]
+        pool = persian if persian else valid[:12]   # محبوب‌ترین‌ها بالای لیست‌اند
+        t = random.choice(pool)
+        t["_mood"] = tag
+        lang_note = "فارسی" if _is_persian(t) else "غیرفارسی (محبوب)"
+        print(f"  🎯 انتخاب شد: «{t.get('name')}» از «{t.get('artist_name')}» "
+              f"(مود: {tag}، {lang_note})")
+        return t
     return None
 
 
@@ -149,16 +159,19 @@ def ai_caption(track):
     tagstr = ", ".join(flat[:8]) if flat else ""
 
     system = (
-        "You write short, emotional, evocative captions in COLLOQUIAL PERSIAN (Farsi) "
-        "for a nightly music ritual on a Telegram channel called «رادیو بولتن». "
-        "You are given a music track (title, artist, mood, tags). Write a heartfelt, "
-        "atmospheric Persian text of about 4 to 7 short lines that sets a feeling for "
-        "tonight and gently invites the reader to press play and listen. "
-        "IMPORTANT: these are independent artists and you do NOT know any real facts or "
-        "biography about them, so do NOT invent a backstory, life events, or factual "
-        "claims about the song or the artist. Keep it about mood, feeling, and the night "
-        "— universal and sincere. No hashtags. Keep it under 550 characters. "
-        "Output ONLY the Persian text, nothing else."
+        "You write VERY SHORT, emotional captions in COLLOQUIAL PERSIAN (Farsi) for a "
+        "nightly music ritual on a Telegram channel called «رادیو بولتن». "
+        "You are given a track (title, artist, mood, tags).\n"
+        "RULES:\n"
+        "1) The caption MUST start with a sentence of the form «این آهنگ برای ...هاییه که ...» "
+        "— choose وقت‌هایی / روزهایی / شب‌هایی / موقع‌هایی to best fit the mood, and name a "
+        "real, relatable moment or feeling that gives the listener a concrete REASON to press "
+        "play right now (a long tiring day, missing someone, needing calm, a fresh start, etc.).\n"
+        "2) Keep it SHORT: 2 to 4 short lines total, ending with a gentle nudge to listen.\n"
+        "3) These are independent artists; you do NOT know real facts about them or the song, "
+        "so NEVER invent a backstory, biography, or factual claim. Stay on mood and feeling.\n"
+        "4) Warm and sincere. No hashtags, no emojis. Keep it under 320 characters.\n"
+        "Output ONLY the Persian caption text, nothing else."
     )
     user = (
         f"Track title: {track.get('name')}\n"
@@ -175,8 +188,10 @@ def ai_caption(track):
     used_model = None
     for m in AI_MODEL_CHAIN:
         try:
-            resp = requests.post(AI_ENDPOINT, headers=headers, timeout=60,
-                                 json={"model": m, "temperature": 0.9, "messages": messages})
+            payload = {"model": m, "messages": messages}
+            if not m.startswith("openai/gpt-5"):
+                payload["temperature"] = 0.9   # GPT-5 فقط دمای پیش‌فرض را می‌پذیرد
+            resp = requests.post(AI_ENDPOINT, headers=headers, timeout=90, json=payload)
             if resp.status_code == 429:
                 print(f"  ⏳ سقفِ {m} پر است؛ مدلِ بعدی...")
                 continue
@@ -191,8 +206,8 @@ def ai_caption(track):
             print(f"  ⚠️ خطای مدلِ {m}:", e)
             continue
     # فالبکِ ساده اگر هیچ مدلی جواب نداد
-    return ("امشب یه قطعه برای خودت بذار و چند دقیقه فقط گوش بده.\n"
-            "بعضی حرفا رو فقط موسیقی می‌تونه بگه."), (used_model or "fallback")
+    return ("این آهنگ برای شب‌هاییه که دلت یه آرامشِ ساده می‌خواد.\n"
+            "بذارش، چند دقیقه فقط گوش بده."), (used_model or "fallback")
 
 
 def build_caption(body, track):
@@ -200,8 +215,8 @@ def build_caption(body, track):
     name   = html.escape(str(track.get("name", "")))
     lic    = track.get("license_ccurl") or "https://creativecommons.org/licenses/"
     body   = html.escape(body.strip())
-    if len(body) > 600:
-        body = body[:599].rstrip() + "…"
+    if len(body) > 400:
+        body = body[:399].rstrip() + "…"
     credit = (f"\n\n🎙 هنرمند: {artist}"
               f"\n🎵 قطعه: {name}"
               f"\nلایسنس: <a href=\"{html.escape(lic)}\">Creative Commons</a> · از Jamendo")
