@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 ربات ۳ — «رادیو بولتن» نسخهٔ موسیقیِ شبانه
-هر شب ساعت ۲۱ به‌وقت تهران یک قطعهٔ موسیقی از archive.org برمی‌دارد، متادیتای فایل را
-با نام چنل برند می‌کند (آلبوم + عنوان)، کِردیتِ هنرمند و لینکِ لایسنس را حفظ می‌کند،
-یک متنِ احساسیِ فارسی می‌نویسد و به‌صورتِ فایلِ صوتی می‌فرستد.
-ایمنی: فقط آیتم‌هایی با لایسنسِ آزاد (Creative Commons / مالکیت عمومی) استفاده می‌شوند؛
-هر آیتمی که لایسنسِ آزاد نداشته باشد رد می‌شود. استفادهٔ غیرتجاری.
+هر شب ساعت ۲۱ به‌وقت تهران یک قطعهٔ موسیقی با لایسنس Creative Commons از Jamendo
+برمی‌دارد، متادیتای فایل را با نام چنل برند می‌کند (آلبوم = رادیو بولتن)،
+کِردیتِ هنرمند و لینکِ لایسنس را حفظ می‌کند، یک متنِ احساسیِ فارسی می‌نویسد و
+به‌صورتِ فایلِ صوتی می‌فرستد.
+استفادهٔ غیرتجاری. منبع: Jamendo (Creative Commons).
 """
 
 import os
@@ -15,11 +15,9 @@ import json
 import html
 import random
 import requests
-from urllib.parse import quote
 from datetime import datetime, timezone, timedelta
 
-# mutagen lazily imported inside tag_mp3 (to avoid import error in envs without it until tagging step)
-# In production: pip install mutagen
+from mutagen.id3 import ID3, TIT2, TPE1, TALB, ID3NoHeaderError
 
 # ===================== تنظیمات (این بخش را می‌توانی عوض کنی) =====================
 BOT_NAME       = "رادیو بولتن (موسیقی)"
@@ -28,26 +26,24 @@ CHANNEL_HANDLE = "@RadioBulletin"       # ← هندلِ عمومی که می‌
 BACKUP_CHANNEL = "@analyzeAisTrb"       # کانالِ گزارشِ فنی
 ALBUM_BRAND    = f"رادیو بولتن | {CHANNEL_HANDLE}"   # در فیلدِ آلبومِ فایل می‌نشیند (برندینگ)
 
-# عبارت‌های جست‌وجو برای تنوع (موسیقیِ آزاد)؛ هر شب چندتا امتحان می‌شود
-QUERY_TERMS = ["love", "soul", "jazz", "folk", "piano", "blues",
-               "acoustic", "pop", "world", "romantic", "song", "guitar"]
+# مودهای احساسی و عامه‌پسند (ترجیحاً باکلام)؛ هر شب یکی تصادفی برای تنوع
+MOOD_TAGS = ["pop", "love", "romantic", "emotional", "soul",
+             "rnb", "acoustic", "singersongwriter", "indiepop",
+             "ballad", "melancholic", "happy"]
 
 # ===================== ثابت‌ها =====================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+JAMENDO_CLIENT_ID  = os.environ.get("JAMENDO_CLIENT_ID", "")
 GITHUB_TOKEN       = os.environ.get("GITHUB_TOKEN", "")
 
 AI_MODEL       = "openai/gpt-4.1"      # بهترین مدلِ رایگان (GPT-5 فقط با پلنِ پولی؛ آن‌وقت اینجا "openai/gpt-5" بگذار)
 AI_MODEL_CHAIN = [AI_MODEL, "openai/gpt-4o", "openai/gpt-4o-mini"]
 AI_ENDPOINT    = "https://models.github.ai/inference/chat/completions"
 
-ARCHIVE_SEARCH    = "https://archive.org/advancedsearch.php"
-ARCHIVE_META      = "https://archive.org/metadata/"
-ARCHIVE_DL        = "https://archive.org/download/"
-ARCHIVE_MAX_BYTES = 45 * 1024 * 1024   # سقفِ حجمِ فایل برای تلگرام (۵۰ مگ محدودیتِ بات است)
-UA                = {"User-Agent": "RadioBulletinBot/1.0 (Telegram music ritual)"}
-
+JAMENDO_API = "https://api.jamendo.com/v3.0/tracks"
 STATE_FILE  = "seen.json"
 TEHRAN      = timezone(timedelta(hours=3, minutes=30))
+MAX_CAPTION = 1024
 TG_API      = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 MP3_PATH    = "track.mp3"
 
@@ -72,138 +68,59 @@ def save_state(state):
         print("  ⚠️ نتوانستم وضعیت را ذخیره کنم:", e)
 
 
-# ===================== انتخابِ آهنگ از archive.org =====================
-def _first_creator(meta):
-    c = meta.get("creator")
-    if isinstance(c, list):
-        return (c[0] if c else "ناشناس")
-    return c or "ناشناس"
+# ===================== انتخابِ آهنگ از Jamendo =====================
+def jamendo_fetch(tag, limit=50):
+    params = {
+        "client_id": JAMENDO_CLIENT_ID,
+        "format": "json",
+        "limit": limit,
+        "tags": tag,
+        "order": "popularity_total",
+        "vocalinstrumental": "vocal",      # ترجیحاً باکلام (نه بی‌کلام)
+        "include": "musicinfo licenses",   # requests فاصله را به + تبدیل می‌کند
+        "audiodownload_allowed": "true",
+    }
+    r = requests.get(JAMENDO_API, params=params, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+    return data.get("results", []) or []
 
 
-def pick_track(used_set):
-    """جستجو در archive.org برای یک قطعهٔ موسیقی با لایسنس آزاد (Creative Commons / Public Domain)
-    که قبلاً پخش نشده باشد. چند کوئری را امتحان می‌کند و از بین نتایج مناسب یکی را برمی‌گرداند.
-    """
-    random.shuffle(QUERY_TERMS)
-    attempts = 0
-    max_attempts = 12  # حدود ۳-۴ کوئری × چند صفحه
+def _is_persian(t):
+    lang = str(((t.get("musicinfo") or {}).get("lang") or "")).lower()
+    return lang in ("fa", "fas", "per", "persian")
 
-    while attempts < max_attempts:
-        attempts += 1
-        q = random.choice(QUERY_TERMS)
-        print(f"  🔍 جستجو برای «{q}» (تلاش {attempts}/{max_attempts}) ...")
 
-        # ساخت کوئری جستجو: فقط صوت + لایسنس آزاد
-        search_q = f'mediatype:audio AND ({q}) AND (licenseurl:*creativecommons* OR licenseurl:*publicdomain*)'
-        params = {
-            "q": search_q,
-            "fl[]": ["identifier", "title", "creator", "licenseurl", "item_size"],
-            "rows": "30",
-            "page": str(random.randint(1, 4)),
-            "output": "json",
-            "sort[]": "downloads desc"  # محبوب‌ترین‌ها اول، بعد shuffle برای تنوع
-        }
-
+def pick_track(used_ids):
+    """یک آهنگِ باکلامِ تکراری‌نشده پیدا می‌کند؛ اگر فارسی بود اولویت دارد،
+    وگرنه از بینِ محبوب‌ترین‌ها (که عامه‌پسندترند) یکی انتخاب می‌کند."""
+    tags = MOOD_TAGS[:]
+    random.shuffle(tags)
+    for tag in tags[:6]:
         try:
-            resp = requests.get(ARCHIVE_SEARCH, params=params, headers=UA, timeout=25)
-            if resp.status_code != 200:
-                print(f"    ⚠️ کد وضعیت جستجو: {resp.status_code}")
-                continue
-            j = resp.json()
-            docs = j.get("response", {}).get("docs", []) or []
-            if not docs:
-                continue
-
-            random.shuffle(docs)  # برای تنوع بیشتر
-
-            for doc in docs:
-                ident = str(doc.get("identifier", "")).strip()
-                if not ident or ident in used_set:
-                    continue
-
-                # دریافت متادیتای کامل آیتم
-                try:
-                    mresp = requests.get(f"{ARCHIVE_META}{ident}", headers=UA, timeout=20)
-                    mresp.raise_for_status()
-                    meta = mresp.json()
-                except Exception as me:
-                    print(f"    ⚠️ متادیتای {ident} دریافت نشد: {me}")
-                    continue
-
-                md = meta.get("metadata", {}) or {}
-                files = meta.get("files", []) or []
-
-                # بررسی لایسنس
-                lic_url = md.get("licenseurl") or doc.get("licenseurl") or ""
-                lic_lower = str(lic_url).lower()
-                if not ("creativecommons" in lic_lower or "publicdomain" in lic_lower):
-                    continue
-
-                # پیدا کردن فایل mp3 مناسب (کوچک‌تر از سقف و واقعی)
-                audio_file = None
-                for f in files:
-                    fname = (f.get("name") or "").lower()
-                    fmt = f.get("format") or ""
-                    if fname.endswith(".mp3") and fmt in ("MP3", "VBR MP3", "MPEG Audio", "audio/mpeg"):
-                        try:
-                            fsize = int(str(f.get("size", 0)).replace(",", ""))
-                        except Exception:
-                            fsize = 0
-                        if 20000 < fsize < ARCHIVE_MAX_BYTES:
-                            audio_file = f
-                            break
-                if not audio_file:
-                    continue
-
-                # استخراج عنوان و هنرمند
-                title = md.get("title") or doc.get("title") or ident
-                if isinstance(title, list):
-                    title = title[0]
-                creator = _first_creator(md)
-                if isinstance(creator, list):
-                    creator = creator[0] if creator else "ناشناس"
-
-                dl_url = f"{ARCHIVE_DL}{ident}/{audio_file.get('name')}"
-
-                # تگ‌ها برای کمک به AI (از subject/archive tags)
-                subjects = md.get("subject", []) or []
-                if isinstance(subjects, str):
-                    subjects = [subjects]
-                genres = [s.strip() for s in subjects if isinstance(s, str)][:6] or [q]
-
-                track = {
-                    "id": ident,
-                    "name": str(title).strip()[:120],
-                    "artist_name": str(creator).strip()[:80] or "ناشناس",
-                    "audiodownload": dl_url,
-                    "license_ccurl": lic_url or "https://creativecommons.org/licenses/by/4.0/",
-                    "_mood": q,   # راهنمایی مود برای پرامپت AI
-                    "musicinfo": {
-                        "tags": {
-                            "genres": genres,
-                            "instruments": [],
-                            "vartags": []
-                        }
-                    }
-                }
-
-                print(f"  ✅ آهنگ مناسب پیدا شد: «{track['name']}» — {track['artist_name']}")
-                return track
-
+            results = jamendo_fetch(tag)
         except Exception as e:
-            print(f"  ⚠️ خطا در جستجو/پردازش: {e}")
+            print(f"  ⚠️ خطا در گرفتنِ آهنگ‌های مودِ «{tag}»:", e)
             continue
-
-    # اگر هیچی پیدا نشد
-    raise RuntimeError(
-        "بعد از چندین تلاش هیچ قطعهٔ موسیقی آزادی (با لایسنس CC/PD) پیدا نشد. "
-        "لطفاً بعداً دوباره امتحان کنید یا کوئری‌ها را تغییر دهید."
-    )
+        valid = [t for t in results
+                 if str(t.get("id", "")) and str(t.get("id")) not in used_ids
+                 and t.get("audiodownload")]
+        if not valid:
+            continue
+        persian = [t for t in valid if _is_persian(t)]
+        pool = persian if persian else valid[:12]   # محبوب‌ترین‌ها بالای لیست‌اند
+        t = random.choice(pool)
+        t["_mood"] = tag
+        lang_note = "فارسی" if _is_persian(t) else "غیرفارسی (محبوب)"
+        print(f"  🎯 انتخاب شد: «{t.get('name')}» از «{t.get('artist_name')}» "
+              f"(مود: {tag}، {lang_note})")
+        return t
+    return None
 
 
 # ===================== دانلود و تگ‌گذاری =====================
 def download_mp3(url, path):
-    with requests.get(url, headers=UA, stream=True, timeout=120) as r:
+    with requests.get(url, stream=True, timeout=90) as r:
         r.raise_for_status()
         total = 0
         with open(path, "wb") as f:
@@ -218,13 +135,11 @@ def download_mp3(url, path):
 
 
 def tag_mp3(path, title, artist, album):
-    # Lazy import so the script can at least start/check tokens even if mutagen not installed yet
-    from mutagen.id3 import ID3, TIT2, TPE1, TALB, ID3NoHeaderError
     try:
         tags = ID3(path)
     except ID3NoHeaderError:
         tags = ID3()
-    tags.setall("TIT2", [TIT2(encoding=3, text=title)])    # عنوان (+ هندلِ چنل)
+    tags.setall("TIT2", [TIT2(encoding=3, text=title)])    # عنوان
     tags.setall("TPE1", [TPE1(encoding=3, text=artist)])   # هنرمند (کِردیت)
     tags.setall("TALB", [TALB(encoding=3, text=album)])    # آلبوم (برندِ چنل)
     tags.save(path)
@@ -254,8 +169,8 @@ def ai_caption(track):
         "2) The little story/scene you tell MUST tightly match the VIBE of THIS specific song. "
         "Infer the vibe from its mood, tags and title, and paint a scene or feeling that truly "
         "belongs to THIS song's world — never generic filler that could fit any random song.\n"
-        "3) You do NOT know real facts about the artist or the song, so NEVER state invented "
-        "facts, biography, or events as if true. Stay in mood/feeling/scene.\n"
+        "3) These are independent artists; you do NOT know real facts about them or the song, so "
+        "NEVER state invented facts, biography, or events as if true. Stay in mood/feeling/scene.\n"
         "4) SHORT: 2 to 4 short lines, ending with a gentle nudge to listen. Warm and sincere. "
         "No hashtags, no emojis. Keep it under 320 characters.\n"
         "Output ONLY the Persian caption text, nothing else."
@@ -265,6 +180,7 @@ def ai_caption(track):
         f"Artist: {track.get('artist_name')}\n"
         f"Mood: {mood}\n"
         f"Tags: {tagstr}\n"
+        f"Duration (sec): {track.get('duration')}\n"
         "Write the Persian caption now."
     )
     messages = [{"role": "system", "content": system},
@@ -306,11 +222,11 @@ def build_caption(body, track):
     details = (
         f"🎙 هنرمند: {artist}\n"
         f"🎵 قطعه: {name}\n"
-        f"📜 لایسنس: <a href=\"{html.escape(lic)}\">Creative Commons</a> · از archive.org\n"
-        f"🎧 رادیو بولتن — {CHANNEL_HANDLE}"
+        f"📜 لایسنس: <a href=\"{html.escape(lic)}\">Creative Commons</a> · از Jamendo"
     )
-    # داستان بولد؛ جزئیات داخلِ کوت
-    return f"<b>{body}</b>\n\n<blockquote>{details}</blockquote>"
+    # داستان بولد؛ جزئیات داخلِ کوت؛ امضای چنل خارج از کوت
+    return (f"<b>{body}</b>\n\n<blockquote>{details}</blockquote>"
+            f"\n\n{CHANNEL_HANDLE} | رادیو بولتن")
 
 
 # ===================== تلگرام =====================
@@ -324,7 +240,7 @@ def send_audio(path, caption, performer, title):
             "performer": performer,
             "title": title,
         }
-        r = requests.post(f"{TG_API}/sendAudio", data=data, files=files, timeout=180)
+        r = requests.post(f"{TG_API}/sendAudio", data=data, files=files, timeout=120)
     try:
         j = r.json()
     except Exception:
@@ -348,7 +264,7 @@ def post_backup(track, model_label, msg_id):
             f"🕘 زمان (تهران): {now}\n"
             f"🎵 قطعه: {track.get('name')}\n"
             f"🎙 هنرمند: {track.get('artist_name')}\n"
-            f"🆔 archive.org ID: {track.get('id')}\n"
+            f"🆔 Jamendo ID: {track.get('id')}\n"
             f"📜 لایسنس: {lic}\n"
             f"🤖 مدل: {model_label}\n"
             f"📌 پست: {link}"
@@ -365,6 +281,7 @@ def main():
     print("🎵 شروعِ رادیو بولتن (موسیقی) —",
           datetime.now(TEHRAN).strftime("%Y-%m-%d %H:%M"))
     missing = [k for k, v in [("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN),
+                              ("JAMENDO_CLIENT_ID", JAMENDO_CLIENT_ID),
                               ("GITHUB_TOKEN", GITHUB_TOKEN)] if not v]
     if missing:
         print("❌ این متغیرها ست نشده‌اند:", ", ".join(missing))
@@ -374,10 +291,9 @@ def main():
     used = state.get("used_track_ids", [])
     used_set = set(str(x) for x in used)
 
-    try:
-        track = pick_track(used_set)
-    except Exception as e:
-        print("❌ انتخاب آهنگ ناموفق:", e)
+    track = pick_track(used_set)
+    if not track:
+        print("⛔ آهنگِ تازه‌ای پیدا نشد (شاید مودها امشب خالی بودند). فردا دوباره.")
         return
 
     # دانلود
@@ -393,16 +309,22 @@ def main():
 
     # متادیتا (برندینگ + کِردیت)
     try:
-        tag_mp3(MP3_PATH, title=title_meta, artist=artist_name, album=ALBUM_BRAND)
+        tag_mp3(MP3_PATH,
+                title=title_meta,
+                artist=artist_name,
+                album=ALBUM_BRAND)
     except Exception as e:
         print("  ⚠️ تگ‌گذاری ناموفق (با همان فایل ادامه می‌دهیم):", e)
 
-    # متنِ احساسی + کپشن
+    # متنِ احساسی
     body, model_label = ai_caption(track)
     caption = build_caption(body, track)
 
     # ارسال
-    mid = send_audio(MP3_PATH, caption=caption, performer=artist_name, title=title_meta)
+    mid = send_audio(MP3_PATH,
+                     caption=caption,
+                     performer=artist_name,
+                     title=title_meta)
     if not mid:
         print("❌ ارسال ناموفق بود؛ آهنگ را به لیستِ پخش‌شده اضافه نمی‌کنم.")
         return
@@ -410,7 +332,7 @@ def main():
     # گزارشِ پشتیبان + ذخیرهٔ وضعیت
     post_backup(track, model_label, mid)
     used.append(str(track.get("id")))
-    state["used_track_ids"] = used[-2000:]
+    state["used_track_ids"] = used[-2000:]   # فقط ۲۰۰۰ تای آخر را نگه می‌داریم
     save_state(state)
     print("🏁 تمام شد.")
 
