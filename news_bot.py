@@ -21,10 +21,10 @@ from mutagen.id3 import ID3, TIT2, TPE1, TALB, ID3NoHeaderError
 
 # ===================== تنظیمات (این بخش را می‌توانی عوض کنی) =====================
 BOT_NAME       = "رادیو بولتن (موسیقی)"
-CHANNEL_ID     = "@testbotaii"          # ← اگر چنلِ موسیقیِ جدا داری، اینجا عوضش کن
+CHANNEL_ID     = "@testbotaii"          # ← جایی که پست می‌شود (اگر چنلِ موسیقیِ جدا داری عوضش کن)
+CHANNEL_HANDLE = "@RadioBulletin"       # ← هندلِ عمومی که می‌خواهی مردم join کنند؛ در متادیتا و کپشن می‌آید
 BACKUP_CHANNEL = "@analyzeAisTrb"       # کانالِ گزارشِ فنی
-FOOTER         = "\n\n@RadioBulletin | رادیو بولتن"
-ALBUM_BRAND    = "رادیو بولتن | @RadioBulletin"   # در فیلدِ آلبومِ فایل می‌نشیند (برندینگ)
+ALBUM_BRAND    = f"رادیو بولتن | {CHANNEL_HANDLE}"   # در فیلدِ آلبومِ فایل می‌نشیند (برندینگ)
 
 # مودهای احساسی و عامه‌پسند (ترجیحاً باکلام)؛ هر شب یکی تصادفی برای تنوع
 MOOD_TAGS = ["pop", "love", "romantic", "emotional", "soul",
@@ -36,8 +36,8 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 JAMENDO_CLIENT_ID  = os.environ.get("JAMENDO_CLIENT_ID", "")
 GITHUB_TOKEN       = os.environ.get("GITHUB_TOKEN", "")
 
-AI_MODEL       = "openai/gpt-5"        # بهترین مدل برای داستان؛ یک‌بار در روز راحت جا می‌شود
-AI_MODEL_CHAIN = [AI_MODEL, "openai/gpt-4.1", "openai/gpt-4o", "openai/gpt-4o-mini"]
+AI_MODEL       = "openai/gpt-4.1"      # بهترین مدلِ رایگان (GPT-5 فقط با پلنِ پولی؛ آن‌وقت اینجا "openai/gpt-5" بگذار)
+AI_MODEL_CHAIN = [AI_MODEL, "openai/gpt-4o", "openai/gpt-4o-mini"]
 AI_ENDPOINT    = "https://models.github.ai/inference/chat/completions"
 
 JAMENDO_API = "https://api.jamendo.com/v3.0/tracks"
@@ -164,13 +164,15 @@ def ai_caption(track):
         "You are given a track (title, artist, mood, tags).\n"
         "RULES:\n"
         "1) The caption MUST start with a sentence of the form «این آهنگ برای ...هاییه که ...» "
-        "— choose وقت‌هایی / روزهایی / شب‌هایی / موقع‌هایی to best fit the mood, and name a "
-        "real, relatable moment or feeling that gives the listener a concrete REASON to press "
-        "play right now (a long tiring day, missing someone, needing calm, a fresh start, etc.).\n"
-        "2) Keep it SHORT: 2 to 4 short lines total, ending with a gentle nudge to listen.\n"
-        "3) These are independent artists; you do NOT know real facts about them or the song, "
-        "so NEVER invent a backstory, biography, or factual claim. Stay on mood and feeling.\n"
-        "4) Warm and sincere. No hashtags, no emojis. Keep it under 320 characters.\n"
+        "— choose وقت‌هایی / روزهایی / شب‌هایی / موقع‌هایی to best fit the mood, naming a real, "
+        "relatable moment that gives the listener a concrete REASON to press play right now.\n"
+        "2) The little story/scene you tell MUST tightly match the VIBE of THIS specific song. "
+        "Infer the vibe from its mood, tags and title, and paint a scene or feeling that truly "
+        "belongs to THIS song's world — never generic filler that could fit any random song.\n"
+        "3) These are independent artists; you do NOT know real facts about them or the song, so "
+        "NEVER state invented facts, biography, or events as if true. Stay in mood/feeling/scene.\n"
+        "4) SHORT: 2 to 4 short lines, ending with a gentle nudge to listen. Warm and sincere. "
+        "No hashtags, no emojis. Keep it under 320 characters.\n"
         "Output ONLY the Persian caption text, nothing else."
     )
     user = (
@@ -217,10 +219,14 @@ def build_caption(body, track):
     body   = html.escape(body.strip())
     if len(body) > 400:
         body = body[:399].rstrip() + "…"
-    credit = (f"\n\n🎙 هنرمند: {artist}"
-              f"\n🎵 قطعه: {name}"
-              f"\nلایسنس: <a href=\"{html.escape(lic)}\">Creative Commons</a> · از Jamendo")
-    return body + credit + FOOTER
+    details = (
+        f"🎙 هنرمند: {artist}\n"
+        f"🎵 قطعه: {name}\n"
+        f"📜 لایسنس: <a href=\"{html.escape(lic)}\">Creative Commons</a> · از Jamendo\n"
+        f"🎧 رادیو بولتن — {CHANNEL_HANDLE}"
+    )
+    # داستان بولد؛ جزئیات داخلِ کوت
+    return f"<b>{body}</b>\n\n<blockquote>{details}</blockquote>"
 
 
 # ===================== تلگرام =====================
@@ -297,11 +303,15 @@ def main():
         print("❌ دانلودِ آهنگ ناموفق:", e)
         return
 
+    # عنوانِ متادیتا = اسمِ آهنگ + هندلِ چنل (کنارِ اسمِ آهنگ در پلیر دیده می‌شود)
+    title_meta = f"{str(track.get('name', '')).strip()} | {CHANNEL_HANDLE}"
+    artist_name = str(track.get("artist_name", ""))
+
     # متادیتا (برندینگ + کِردیت)
     try:
         tag_mp3(MP3_PATH,
-                title=str(track.get("name", "")),
-                artist=str(track.get("artist_name", "")),
+                title=title_meta,
+                artist=artist_name,
                 album=ALBUM_BRAND)
     except Exception as e:
         print("  ⚠️ تگ‌گذاری ناموفق (با همان فایل ادامه می‌دهیم):", e)
@@ -313,8 +323,8 @@ def main():
     # ارسال
     mid = send_audio(MP3_PATH,
                      caption=caption,
-                     performer=str(track.get("artist_name", "")),
-                     title=str(track.get("name", "")))
+                     performer=artist_name,
+                     title=title_meta)
     if not mid:
         print("❌ ارسال ناموفق بود؛ آهنگ را به لیستِ پخش‌شده اضافه نمی‌کنم.")
         return
