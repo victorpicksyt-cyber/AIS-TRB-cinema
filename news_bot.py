@@ -78,23 +78,6 @@ def _first_creator(meta):
         return (c[0] if c else "ناشناس")
     return c or "ناشناس"
 
-
-def archive_search(term, rows=50):
-    # فقط آیتم‌های صوتی که اصلاً فیلدِ لایسنس دارند؛ گیتِ نهاییِ لایسنس در archive_resolve است
-    params = [
-        ("q", f'mediatype:(audio) AND licenseurl:[* TO *] AND ({term})'),
-        ("fl[]", "identifier"), ("fl[]", "title"),
-        ("fl[]", "creator"), ("fl[]", "licenseurl"),
-        ("rows", str(rows)),
-        ("page", str(random.randint(1, 15))),
-        ("output", "json"),
-        ("sort[]", "downloads desc"),   # محبوب‌ترها بالاتر
-    ]
-    r = requests.get(ARCHIVE_SEARCH, params=params, headers=UA, timeout=30)
-    r.raise_for_status()
-    return (r.json().get("response", {}) or {}).get("docs", []) or []
-
-
 # ===================== دانلود و تگ‌گذاری =====================
 def download_mp3(url, path):
     with requests.get(url, headers=UA, stream=True, timeout=120) as r:
