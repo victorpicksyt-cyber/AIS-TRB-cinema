@@ -222,11 +222,11 @@ def build_caption(body, track):
     details = (
         f"🎙 هنرمند: {artist}\n"
         f"🎵 قطعه: {name}\n"
-        f"📜 لایسنس: <a href=\"{html.escape(lic)}\">Creative Commons</a> · از Jamendo\n"
-        f"🎧 رادیو بولتن — {CHANNEL_HANDLE}"
+        f"📜 لایسنس: <a href=\"{html.escape(lic)}\">Creative Commons</a> · از Jamendo"
     )
-    # داستان بولد؛ جزئیات داخلِ کوت
-    return f"<b>{body}</b>\n\n<blockquote>{details}</blockquote>"
+    # داستان بولد؛ جزئیات داخلِ کوت؛ امضای چنل خارج از کوت
+    return (f"<b>{body}</b>\n\n<blockquote>{details}</blockquote>"
+            f"\n\n{CHANNEL_HANDLE} | رادیو بولتن")
 
 
 # ===================== تلگرام =====================
