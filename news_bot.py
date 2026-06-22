@@ -18,7 +18,8 @@ import requests
 from urllib.parse import quote
 from datetime import datetime, timezone, timedelta
 
-from mutagen.id3 import ID3, TIT2, TPE1, TALB, ID3NoHeaderError
+# mutagen lazily imported inside tag_mp3 (to avoid import error in envs without it until tagging step)
+# In production: pip install mutagen
 
 # ===================== تنظیمات (این بخش را می‌توانی عوض کنی) =====================
 BOT_NAME       = "رادیو بولتن (موسیقی)"
@@ -78,6 +79,128 @@ def _first_creator(meta):
         return (c[0] if c else "ناشناس")
     return c or "ناشناس"
 
+
+def pick_track(used_set):
+    """جستجو در archive.org برای یک قطعهٔ موسیقی با لایسنس آزاد (Creative Commons / Public Domain)
+    که قبلاً پخش نشده باشد. چند کوئری را امتحان می‌کند و از بین نتایج مناسب یکی را برمی‌گرداند.
+    """
+    random.shuffle(QUERY_TERMS)
+    attempts = 0
+    max_attempts = 12  # حدود ۳-۴ کوئری × چند صفحه
+
+    while attempts < max_attempts:
+        attempts += 1
+        q = random.choice(QUERY_TERMS)
+        print(f"  🔍 جستجو برای «{q}» (تلاش {attempts}/{max_attempts}) ...")
+
+        # ساخت کوئری جستجو: فقط صوت + لایسنس آزاد
+        search_q = f'mediatype:audio AND ({q}) AND (licenseurl:*creativecommons* OR licenseurl:*publicdomain*)'
+        params = {
+            "q": search_q,
+            "fl[]": ["identifier", "title", "creator", "licenseurl", "item_size"],
+            "rows": "30",
+            "page": str(random.randint(1, 4)),
+            "output": "json",
+            "sort[]": "downloads desc"  # محبوب‌ترین‌ها اول، بعد shuffle برای تنوع
+        }
+
+        try:
+            resp = requests.get(ARCHIVE_SEARCH, params=params, headers=UA, timeout=25)
+            if resp.status_code != 200:
+                print(f"    ⚠️ کد وضعیت جستجو: {resp.status_code}")
+                continue
+            j = resp.json()
+            docs = j.get("response", {}).get("docs", []) or []
+            if not docs:
+                continue
+
+            random.shuffle(docs)  # برای تنوع بیشتر
+
+            for doc in docs:
+                ident = str(doc.get("identifier", "")).strip()
+                if not ident or ident in used_set:
+                    continue
+
+                # دریافت متادیتای کامل آیتم
+                try:
+                    mresp = requests.get(f"{ARCHIVE_META}{ident}", headers=UA, timeout=20)
+                    mresp.raise_for_status()
+                    meta = mresp.json()
+                except Exception as me:
+                    print(f"    ⚠️ متادیتای {ident} دریافت نشد: {me}")
+                    continue
+
+                md = meta.get("metadata", {}) or {}
+                files = meta.get("files", []) or []
+
+                # بررسی لایسنس
+                lic_url = md.get("licenseurl") or doc.get("licenseurl") or ""
+                lic_lower = str(lic_url).lower()
+                if not ("creativecommons" in lic_lower or "publicdomain" in lic_lower):
+                    continue
+
+                # پیدا کردن فایل mp3 مناسب (کوچک‌تر از سقف و واقعی)
+                audio_file = None
+                for f in files:
+                    fname = (f.get("name") or "").lower()
+                    fmt = f.get("format") or ""
+                    if fname.endswith(".mp3") and fmt in ("MP3", "VBR MP3", "MPEG Audio", "audio/mpeg"):
+                        try:
+                            fsize = int(str(f.get("size", 0)).replace(",", ""))
+                        except Exception:
+                            fsize = 0
+                        if 20000 < fsize < ARCHIVE_MAX_BYTES:
+                            audio_file = f
+                            break
+                if not audio_file:
+                    continue
+
+                # استخراج عنوان و هنرمند
+                title = md.get("title") or doc.get("title") or ident
+                if isinstance(title, list):
+                    title = title[0]
+                creator = _first_creator(md)
+                if isinstance(creator, list):
+                    creator = creator[0] if creator else "ناشناس"
+
+                dl_url = f"{ARCHIVE_DL}{ident}/{audio_file.get('name')}"
+
+                # تگ‌ها برای کمک به AI (از subject/archive tags)
+                subjects = md.get("subject", []) or []
+                if isinstance(subjects, str):
+                    subjects = [subjects]
+                genres = [s.strip() for s in subjects if isinstance(s, str)][:6] or [q]
+
+                track = {
+                    "id": ident,
+                    "name": str(title).strip()[:120],
+                    "artist_name": str(creator).strip()[:80] or "ناشناس",
+                    "audiodownload": dl_url,
+                    "license_ccurl": lic_url or "https://creativecommons.org/licenses/by/4.0/",
+                    "_mood": q,   # راهنمایی مود برای پرامپت AI
+                    "musicinfo": {
+                        "tags": {
+                            "genres": genres,
+                            "instruments": [],
+                            "vartags": []
+                        }
+                    }
+                }
+
+                print(f"  ✅ آهنگ مناسب پیدا شد: «{track['name']}» — {track['artist_name']}")
+                return track
+
+        except Exception as e:
+            print(f"  ⚠️ خطا در جستجو/پردازش: {e}")
+            continue
+
+    # اگر هیچی پیدا نشد
+    raise RuntimeError(
+        "بعد از چندین تلاش هیچ قطعهٔ موسیقی آزادی (با لایسنس CC/PD) پیدا نشد. "
+        "لطفاً بعداً دوباره امتحان کنید یا کوئری‌ها را تغییر دهید."
+    )
+
+
 # ===================== دانلود و تگ‌گذاری =====================
 def download_mp3(url, path):
     with requests.get(url, headers=UA, stream=True, timeout=120) as r:
@@ -95,6 +218,8 @@ def download_mp3(url, path):
 
 
 def tag_mp3(path, title, artist, album):
+    # Lazy import so the script can at least start/check tokens even if mutagen not installed yet
+    from mutagen.id3 import ID3, TIT2, TPE1, TALB, ID3NoHeaderError
     try:
         tags = ID3(path)
     except ID3NoHeaderError:
@@ -249,7 +374,11 @@ def main():
     used = state.get("used_track_ids", [])
     used_set = set(str(x) for x in used)
 
-    track = pick_track(used_set)
+    try:
+        track = pick_track(used_set)
+    except Exception as e:
+        print("❌ انتخاب آهنگ ناموفق:", e)
+        return
 
     # دانلود
     try:
