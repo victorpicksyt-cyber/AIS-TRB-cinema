@@ -80,8 +80,9 @@ def _first_creator(meta):
 
 
 def archive_search(term, rows=50):
+    # فقط آیتم‌های صوتی که اصلاً فیلدِ لایسنس دارند؛ گیتِ نهاییِ لایسنس در archive_resolve است
     params = [
-        ("q", q),
+        ("q", f'mediatype:(audio) AND licenseurl:[* TO *] AND ({term})'),
         ("fl[]", "identifier"), ("fl[]", "title"),
         ("fl[]", "creator"), ("fl[]", "licenseurl"),
         ("rows", str(rows)),
@@ -92,68 +93,6 @@ def archive_search(term, rows=50):
     r = requests.get(ARCHIVE_SEARCH, params=params, headers=UA, timeout=30)
     r.raise_for_status()
     return (r.json().get("response", {}) or {}).get("docs", []) or []
-
-
-def archive_resolve(identifier):
-    """متادیتای آیتم را می‌گیرد؛ فقط اگر لایسنسش آزاد بود یک فایلِ mp3 برمی‌گرداند."""
-    r = requests.get(ARCHIVE_META + identifier, headers=UA, timeout=30)
-    r.raise_for_status()
-    j = r.json()
-    meta = j.get("metadata", {}) or {}
-    best = None
-    for f in (j.get("files", []) or []):
-        name = f.get("name", "")
-        if not name.lower().endswith(".mp3"):
-            continue
-        try:
-            size = int(f.get("size", "0"))
-        except Exception:
-            size = 0
-        if size and size > ARCHIVE_MAX_BYTES:
-            continue
-        best = f
-        break
-    if not best:
-        return None
-    fname = best["name"]
-    title = best.get("title") or meta.get("title") or fname
-    return {
-        "id": identifier,
-        "name": str(title),
-        "artist_name": str(_first_creator(meta)),
-        "license_ccurl": lic,
-        "audiodownload": ARCHIVE_DL + identifier + "/" + quote(fname),
-        "musicinfo": {},
-    }
-
-
-def pick_track(used_ids):
-    """از archive.org یک قطعه‌ی با لایسنسِ آزاد (CC / مالکیت عمومی) و تکراری‌نشده پیدا می‌کند."""
-    terms = QUERY_TERMS[:]
-    random.shuffle(terms)
-    for term in terms[:6]:
-        try:
-            docs = archive_search(term)
-        except Exception as e:
-            print(f"  ⚠️ خطا در جست‌وجوی «{term}»:", e)
-            continue
-        random.shuffle(docs)
-        for d in docs[:8]:   # حداکثر ۸ آیتم برای هر عبارت بررسی می‌شود
-            ident = d.get("identifier", "")
-            if not ident or ident in used_ids:
-                continue
-            try:
-                tr = archive_resolve(ident)
-            except Exception as e:
-                print(f"  ⚠️ خطا در آیتمِ {ident}:", e)
-                continue
-            if not tr:
-                continue
-            tr["_mood"] = term
-            print(f"  🎯 انتخاب شد: «{tr['name']}» از «{tr['artist_name']}» "
-                  f"(جست‌وجو: {term} | لایسنس: {tr['license_ccurl']})")
-            return tr
-    return None
 
 
 # ===================== دانلود و تگ‌گذاری =====================
