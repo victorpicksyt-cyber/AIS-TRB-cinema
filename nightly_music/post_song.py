@@ -98,43 +98,28 @@ def choose_song(history, avoid=None):
         recent = recent + list(avoid)
     system = (
         "تو یک کیوریتور موسیقی حرفه‌ای برای یک کانال تلگرامی با مخاطب ایرانی هستی. "
-        "اولویت اولِ تو این است: آهنگی انتخاب کنی که پشتش یک «داستان واقعی، مستند و جذاب» "
-        "وجود دارد که تو واقعاً از درستی‌اش مطمئنی — مثل ماجرای ساخته‌شدن آهنگ، اتفاقی که "
-        "الهام‌بخشش بوده، یا داستان واقعی پشت متن ترانه. اگر چنین آهنگی پیدا کردی که در لیست "
-        "«انتخاب نکن» نیست، has_real_story را true بگذار و آن داستانِ واقعی را در فیلد story "
-        "بنویس (۴ تا ۶ خط). فقط وقتی true بگذار که مطمئنی داستان واقعی و درست است؛ هرگز داستان "
-        "از خودت نساز و به‌عنوان واقعیت جا نزن. "
-        "اگر آهنگِ تازه‌ای با داستان واقعی پیدا نکردی یا همه‌شان قبلاً فرستاده شده‌اند، یک آهنگ "
-        "خوب دیگر انتخاب کن (ترند، محبوب یا باب میل مخاطب ایرانی)، has_real_story را false و "
-        "story را خالی بگذار. "
-        "ترکیبی متنوع از آهنگ‌های فارسی و بین‌المللی، و آهنگ‌های شناخته‌شده که در سرویس‌های "
-        "موسیقی پیدا می‌شوند انتخاب کن."
+        "اولویت اولت: آهنگی پیشنهاد بده که پشتش یک «داستان واقعی و مستندِ جذاب» وجود دارد "
+        "(ماجرای ساختش، اتفاقی که الهام‌بخشش بوده و...). اگر آهنگِ تازه‌ای با داستان واقعی "
+        "پیدا نکردی یا همه قبلاً فرستاده شده‌اند، یک آهنگ ترند/محبوب/باب میل مخاطب ایرانی بده. "
+        "آهنگ‌های واقعی و شناخته‌شده انتخاب کن که در سرویس‌های موسیقی پیدا می‌شوند. "
+        "ترکیبی متنوع از فارسی و بین‌المللی. آهنگ‌های لیست «انتخاب نکن» را تکرار نکن."
     )
     user = (
-        "یک آهنگ برای امشب انتخاب کن و خروجی را فقط به صورت JSON بده با این کلیدها:\n"
+        "یک آهنگ پیشنهاد بده و خروجی را فقط JSON بده:\n"
         "{\n"
-        '  "title": "نام آهنگ به زبان اصلی",\n'
-        '  "artist": "نام خواننده به زبان اصلی",\n'
-        '  "title_en": "نام آهنگ به انگلیسی/لاتین (برای آهنگ فارسی، فینگلیش)",\n'
-        '  "artist_en": "نام خواننده به انگلیسی/لاتین",\n'
-        '  "language": "fa یا en یا ...",\n'
-        '  "search_query": "عبارت جستجوی تمیز فقط نام خواننده و نام آهنگ، '
-        'بدون کلماتی مثل official/audio/video/lyrics/HD",\n'
-        '  "has_real_story": true یا false,\n'
-        '  "story": "اگر has_real_story=true بود، داستان واقعی (۴ تا ۶ خط)؛ وگرنه خالی",\n'
-        '  "reason": "در یک جمله کوتاه چرا این آهنگ"\n'
+        '  "title": "نام آهنگ",\n'
+        '  "artist": "نام خواننده",\n'
+        '  "search_query": "عبارت جستجوی تمیز: فقط نام خواننده و نام آهنگ، '
+        'بدون کلماتی مثل official/audio/video/lyrics/HD"\n'
         "}\n\n"
         f"آهنگ‌هایی که نباید انتخاب کنی:\n"
         f"{json.dumps(recent, ensure_ascii=False)}"
     )
-    raw = ai_chat(system, user, max_tokens=700, temperature=1.0, json_mode=True)
+    raw = ai_chat(system, user, max_tokens=300, temperature=1.0, json_mode=True)
     song = parse_json(raw)
     for k in ("title", "artist", "search_query"):
         if not song.get(k):
             raise RuntimeError(f"خروجی هوش مصنوعی ناقص بود (کلید «{k}» نبود).")
-    # اگر نسخه‌ی انگلیسی نداد، از همان زبان اصلی استفاده می‌کنیم
-    song["title_en"] = (song.get("title_en") or song["title"]).strip()
-    song["artist_en"] = (song.get("artist_en") or song["artist"]).strip()
     return song
 
 
@@ -166,6 +151,7 @@ def download_song(query):
         "-f", "bestaudio/best",
         "-x", "--audio-format", "mp3", "--audio-quality", "0",
         "--embed-thumbnail", "--embed-metadata",
+        "--write-info-json",
         "-o", out_template,
     ]
     yt_common = common + cookies_args
@@ -187,30 +173,72 @@ def download_song(query):
         mp3s = list(DOWNLOAD_DIR.glob("*.mp3"))
         if result.returncode == 0 and mp3s:
             print(f"[download] ✅ موفق با: {name}")
-            return mp3s[0]
+            return mp3s[0], _read_info()
         print(f"[download] ❌ شکست با: {name} — تلاش بعدی...", file=sys.stderr)
 
     print(last_output, file=sys.stderr)
     raise RuntimeError("دانلود آهنگ با همه‌ی منابع (یوتیوب و ساندکلاد) شکست خورد.")
 
 
-# ------------------------ نوشتن داستان احساسی ------------------------
-def write_story(song):
+def _read_info():
+    """متادیتای واقعیِ فایلِ دانلودشده را از فایل info.json می‌خواند."""
+    info = {}
+    for jf in DOWNLOAD_DIR.glob("*.info.json"):
+        try:
+            info = json.loads(jf.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        break
+    # عنوان و خواننده‌ی واقعیِ منبع
+    real_title = info.get("track") or info.get("title") or ""
+    real_artist = (
+        info.get("artist")
+        or info.get("uploader")
+        or info.get("channel")
+        or ""
+    )
+    return {"title": real_title.strip(), "artist": real_artist.strip()}
+
+
+# --------------- شناسایی آهنگ واقعی + داستان (بر اساس فایل دانلودشده) ---------------
+def describe_track(real_title, real_artist_hint, seed):
+    """
+    بر اساس عنوانِ واقعیِ فایلِ دانلودشده، اسم تمیز آهنگ/خواننده و داستان را می‌سازد.
+    چون ورودی، عنوانِ واقعیِ همان فایل است، اسم نمایش‌داده‌شده دقیقاً با خودِ آهنگ می‌خواند.
+    """
     system = (
-        f"تو یک نویسنده‌ی احساسی و حرفه‌ای هستی و به زبان {STORY_LANGUAGE} می‌نویسی. "
-        "برای یک کانال موسیقی متنی خیلی کوتاه می‌نویسی (حداکثر ۳ خط). "
-        "هدف: کاری کنی که خواننده با خواندنش حس کند این آهنگ دقیقاً برای یک لحظه یا "
-        "صحنه‌ی خاصِ زندگی‌اش ساخته شده و همان لحظه دلش بخواهد گوشش کند — "
-        "یعنی یک صحنه یا حسِ ملموس و قابل‌لمس بساز، نه توصیف کلی. "
-        "لحن شاعرانه، گرم و تأثیرگذار اما بدون اغراق و کلیشه. "
-        "نام آهنگ و خواننده را داخل متن نیاور (جداگانه می‌آید). "
-        "حداکثر ۱ تا ۲ ایموجی. فقط خودِ متن را بنویس، بدون عنوان یا علامت نقل‌قول."
+        "تو یک متخصص موسیقی هستی. عنوان خامِ یک فایل صوتیِ دانلودشده به تو داده می‌شود "
+        "(که از یوتیوب یا ساندکلاد آمده و ممکن است شلوغ باشد). وظیفه‌ات: "
+        "۱) اسم تمیزِ آهنگ و خواننده‌ی واقعی را از روی همین عنوان استخراج کنی (نه چیز دیگر). "
+        "۲) اگر داستانِ واقعی، مستند و درستی از همین آهنگ می‌دانی، آن را روایت کنی. "
+        "بسیار مهم: هرگز داستان از خودت نساز و هیچ اطلاعات نادرستی نده. فقط وقتی has_real_story "
+        "را true بگذار که کاملاً مطمئنی داستان واقعی و درست است. در غیر این صورت false بگذار "
+        "و در story یک متن کوتاهِ احساسی (حداکثر ۳ خط) بنویس که شنونده را مشتاق کند. "
+        "اگر از روی عنوان نمی‌توانی آهنگ را تشخیص دهی، اسم را همان‌طور که هست تمیز کن."
     )
     user = (
-        f"آهنگ: «{song['title']}» از {song['artist']}.\n"
-        "یک متن خیلی کوتاه (حداکثر ۳ خط) بنویس که خواننده را به شنیدن آهنگ مشتاق کند."
+        f"عنوان خام فایل دانلودشده: «{real_title}»\n"
+        f"نام آپلودکننده/خواننده‌ی احتمالی: «{real_artist_hint}»\n"
+        f"(برای کمک، جستجوی اولیه این بود: «{seed}»)\n\n"
+        "خروجی را فقط JSON بده:\n"
+        "{\n"
+        '  "title": "اسم تمیز آهنگ به زبان اصلی",\n'
+        '  "artist": "اسم تمیز خواننده به زبان اصلی",\n'
+        '  "title_en": "اسم آهنگ به انگلیسی/لاتین",\n'
+        '  "artist_en": "اسم خواننده به انگلیسی/لاتین",\n'
+        '  "has_real_story": true یا false,\n'
+        '  "story": "داستان واقعی (۴ تا ۶ خط) اگر مطمئنی؛ وگرنه متن احساسی کوتاه (۳ خط)"\n'
+        "}"
     )
-    return ai_chat(system, user, max_tokens=300, temperature=0.95)
+    raw = ai_chat(system, user, max_tokens=700, temperature=0.85, json_mode=True)
+    data = parse_json(raw)
+    # پشتیبان: اگر چیزی خالی ماند، از عنوان واقعی/seed استفاده کن
+    data["title"] = (data.get("title") or real_title or seed).strip()
+    data["artist"] = (data.get("artist") or real_artist_hint).strip()
+    data["title_en"] = (data.get("title_en") or data["title"]).strip()
+    data["artist_en"] = (data.get("artist_en") or data["artist"]).strip()
+    data["story"] = (data.get("story") or "").strip()
+    return data
 
 
 # ------------------------ ست‌کردن متادیتای فایل ------------------------
@@ -269,15 +297,16 @@ def main():
     history = load_history()
 
     mp3 = None
-    song = None
+    info = None
+    seed = None
     tried = []
     for i in range(MAX_SONG_ATTEMPTS):
-        song = choose_song(history, avoid=tried)
-        label = f"{song['artist']} - {song['title']}"
-        print(f"🎯 ({i + 1}/{MAX_SONG_ATTEMPTS}) آهنگ: {label}")
+        seed = choose_song(history, avoid=tried)
+        label = f"{seed['artist']} - {seed['title']}"
+        print(f"🎯 ({i + 1}/{MAX_SONG_ATTEMPTS}) جستجو برای: {label}")
         try:
-            mp3 = download_song(song["search_query"])
-            print(f"⬇️  دانلود شد: {mp3.name}")
+            mp3, info = download_song(seed["search_query"])
+            print(f"⬇️  دانلود شد: {mp3.name} | عنوان واقعی: {info.get('title')}")
             break
         except RuntimeError as e:
             print(f"⚠️  این آهنگ دانلود نشد: {e}", file=sys.stderr)
@@ -285,52 +314,53 @@ def main():
             tried.append(label.lower())
             mp3 = None
 
-    if not mp3 or not song:
+    if not mp3 or not info:
         raise RuntimeError("بعد از چند تلاش، هیچ آهنگی قابل دانلود نبود.")
 
+    # شناساییِ آهنگِ واقعی + داستان، بر اساس عنوانِ همان فایلی که دانلود شد
+    track = describe_track(
+        info.get("title", ""),
+        info.get("artist", ""),
+        seed["search_query"],
+    )
+    if track.get("has_real_story"):
+        print(f"📖 داستان واقعی: {track['artist']} — {track['title']}")
+    else:
+        print(f"✍️  داستان احساسی: {track['artist']} — {track['title']}")
+
     # نام انگلیسی برای متادیتای فایل + گذاشتن آیدی کانال کنار نام آهنگ
-    title_en = song["title_en"]
-    artist_en = song["artist_en"]
+    title_en = track["title_en"]
+    artist_en = track["artist_en"]
     file_title = f"{title_en} | {CHANNEL_ID}"
     set_file_tags(mp3, file_title, artist_en, CHANNEL_TAG)
 
-    # داستان: اگر داستان واقعی موجود بود همان را می‌فرستیم، وگرنه خودمان می‌نویسیم
-    if song.get("has_real_story") and song.get("story", "").strip():
-        story = song["story"].strip()
-        print("📖 داستان واقعی پیدا شد")
-    else:
-        story = write_story(song)
-        print("✍️  داستان احساسی نوشته شد")
-
-    title = html.escape(song["title"])
-    artist = html.escape(song["artist"])
-    story_safe = html.escape(story)
+    title = html.escape(track["title"])
+    artist = html.escape(track["artist"])
+    story_safe = html.escape(track["story"])
     tag_safe = html.escape(CHANNEL_TAG)
 
-    # چیدمان: داستانِ بولد → کوتِ خواننده/آهنگ → تگ کانالِ بولد
+    # چیدمان جدید: اسم خواننده/آهنگِ بولد بالا → داستان در کوتِ کلپس‌شده → تگ کانالِ بولد
     caption = (
-        f"<b>{story_safe}</b>\n\n"
-        f"<blockquote>🎵 {artist} — {title}</blockquote>\n\n"
+        f"<b>🎵 {artist} — {title}</b>\n\n"
+        f"<blockquote expandable>{story_safe}</blockquote>\n\n"
         f"<b>{tag_safe}</b>"
     )
 
     if len(caption) <= 1024:
         send_audio(mp3, file_title, artist_en, caption)
     else:
-        # حالت نادر (داستان خیلی بلند): آهنگ با کوت+تگ، داستان در پیام جدا
-        short_caption = (
-            f"<blockquote>🎵 {artist} — {title}</blockquote>\n\n<b>{tag_safe}</b>"
-        )
+        # حالت نادر (داستان خیلی بلند): آهنگ با سرتیتر+تگ، داستان در پیام جدا
+        short_caption = f"<b>🎵 {artist} — {title}</b>\n\n<b>{tag_safe}</b>"
         send_audio(mp3, file_title, artist_en, short_caption)
-        send_message(f"<b>{story_safe}</b>")
+        send_message(f"<blockquote expandable>{story_safe}</blockquote>")
     print("📨 ارسال شد به کانال")
 
-    key = f"{song['artist']} - {song['title']}".lower()
+    key = f"{track['artist']} - {track['title']}".lower()
     history.append(
         {
             "key": key,
-            "title": song["title"],
-            "artist": song["artist"],
+            "title": track["title"],
+            "artist": track["artist"],
             "date": time.strftime("%Y-%m-%d"),
         }
     )
