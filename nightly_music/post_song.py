@@ -140,40 +140,39 @@ def download_song(query):
         cookies_file.write_text(cookies_data + "\n", encoding="utf-8")
         cookies_args = ["--cookies", str(cookies_file)]
 
-    base = [
+    common = [
         "yt-dlp",
-        f"ytsearch1:{query}",
         "--no-playlist",
         "-f", "bestaudio/best",
         "-x", "--audio-format", "mp3", "--audio-quality", "0",
         "--embed-thumbnail", "--embed-metadata",
-        "--no-warnings",
         "-o", out_template,
-    ] + cookies_args
+    ]
+    yt_common = common + cookies_args
 
-    # چند کلاینت مختلف یوتیوب را به ترتیب امتحان می‌کنیم تا از خطای
-    # «Requested format is not available» و پلیرِ downgraded عبور کنیم.
-    client_strategies = [
-        ["--extractor-args", "youtube:player_client=default,-tv"],
-        ["--extractor-args", "youtube:player_client=web_safari"],
-        ["--extractor-args", "youtube:player_client=ios"],
-        ["--extractor-args", "youtube:player_client=android"],
+    # چند منبع/کلاینت را به ترتیب امتحان می‌کنیم. اگر یوتیوب گیر داد،
+    # خودکار سراغ ساندکلاد می‌رویم که مشکل بات/جاوااسکریپت ندارد.
+    strategies = [
+        ("یوتیوب default", yt_common + ["--extractor-args", "youtube:player_client=default,-tv", f"ytsearch1:{query}"]),
+        ("یوتیوب ios", yt_common + ["--extractor-args", "youtube:player_client=ios", f"ytsearch1:{query}"]),
+        ("یوتیوب android", yt_common + ["--extractor-args", "youtube:player_client=android", f"ytsearch1:{query}"]),
+        ("ساندکلاد", common + [f"scsearch1:{query}"]),
     ]
 
     last_output = ""
-    for extra in client_strategies:
+    for name, cmd in strategies:
         for old in DOWNLOAD_DIR.glob("*.mp3"):
             old.unlink()
-        result = subprocess.run(base + extra, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True)
         last_output = result.stdout + "\n" + result.stderr
         mp3s = list(DOWNLOAD_DIR.glob("*.mp3"))
         if result.returncode == 0 and mp3s:
-            print(f"[download] موفق با {extra[1]}")
+            print(f"[download] ✅ موفق با: {name}")
             return mp3s[0]
-        print(f"[download] شکست با {extra[1]} — تلاش بعدی...", file=sys.stderr)
+        print(f"[download] ❌ شکست با: {name} — تلاش بعدی...", file=sys.stderr)
 
     print(last_output, file=sys.stderr)
-    raise RuntimeError("دانلود آهنگ از یوتیوب با همه‌ی روش‌ها شکست خورد.")
+    raise RuntimeError("دانلود آهنگ با همه‌ی منابع (یوتیوب و ساندکلاد) شکست خورد.")
 
 
 # ------------------------ نوشتن داستان احساسی ------------------------
