@@ -85,8 +85,10 @@ def save_history(history):
 
 
 # ------------------------ انتخاب هوشمند آهنگ ------------------------
-def choose_song(history):
+def choose_song(history, avoid=None):
     recent = [h["key"] for h in history[-MAX_HISTORY:]]
+    if avoid:
+        recent = recent + list(avoid)
     system = (
         "تو یک کیوریتور موسیقی حرفه‌ای برای یک کانال تلگرامی با مخاطب ایرانی هستی. "
         "هر شب یک آهنگ انتخاب می‌کنی که حداقل یکی از این ویژگی‌ها را داشته باشد: "
@@ -94,8 +96,8 @@ def choose_song(history):
         "۲) این روزها ترند و محبوب باشد، "
         "۳) باب میل و سلیقه‌ی مخاطب ایرانی باشد. "
         "ترکیبی متنوع از آهنگ‌های فارسی/ایرانی و بین‌المللی انتخاب کن و خودت را به یک سبک محدود نکن. "
-        "حتماً آهنگ‌های واقعی و موجود که روی یوتیوب پیدا می‌شوند را انتخاب کن. "
-        "آهنگ‌هایی که در لیست «قبلاً فرستاده‌شده» آمده‌اند را دوباره انتخاب نکن."
+        "آهنگ‌های واقعی و شناخته‌شده انتخاب کن که احتمال پیدا شدنشان در سرویس‌های موسیقی بالا باشد. "
+        "آهنگ‌هایی که در لیست «انتخاب نکن» آمده‌اند را دوباره انتخاب نکن."
     )
     user = (
         "یک آهنگ برای امشب انتخاب کن و خروجی را فقط به صورت JSON بده با این کلیدها:\n"
@@ -103,17 +105,17 @@ def choose_song(history):
         '  "title": "نام دقیق آهنگ",\n'
         '  "artist": "نام خواننده",\n'
         '  "language": "fa یا en یا ...",\n'
-        '  "youtube_query": "بهترین عبارت جستجو در یوتیوب برای پیدا کردن نسخه رسمی/باکیفیت، '
-        'معمولاً: نام‌خواننده نام‌آهنگ official audio",\n'
+        '  "search_query": "عبارت جستجوی تمیز فقط شامل نام خواننده و نام آهنگ '
+        '(به انگلیسی/فینگلیش اگر خواننده بین‌المللی است). بدون کلماتی مثل '
+        'official، audio، video، lyrics، HD",\n'
         '  "reason": "در یک جمله کوتاه چرا این آهنگ"\n'
         "}\n\n"
-        f"آهنگ‌هایی که قبلاً فرستاده شده‌اند (هیچ‌کدام را انتخاب نکن):\n"
+        f"آهنگ‌هایی که نباید انتخاب کنی:\n"
         f"{json.dumps(recent, ensure_ascii=False)}"
     )
     raw = ai_chat(system, user, max_tokens=400, temperature=1.0, json_mode=True)
     song = parse_json(raw)
-    # اعتبارسنجی حداقلی
-    for k in ("title", "artist", "youtube_query"):
+    for k in ("title", "artist", "search_query"):
         if not song.get(k):
             raise RuntimeError(f"خروجی هوش مصنوعی ناقص بود (کلید «{k}» نبود).")
     return song
@@ -122,9 +124,10 @@ def choose_song(history):
 # ------------------------ دانلود آهنگ (ماژولار) ------------------------
 def download_song(query):
     """
-    آهنگ را از یوتیوب به mp3 دانلود می‌کند و کاور + متادیتا را داخل فایل جاسازی می‌کند.
-    اگر خواستی بعداً از پایپلاین خودِ DezAlty استفاده کنی، فقط همین تابع را عوض کن
-    (کافی است مسیر یک فایل mp3 معتبر را برگردانی).
+    آهنگ را به mp3 دانلود می‌کند (اول ساندکلاد، بعد یوتیوب) و کاور + متادیتا
+    را داخل فایل جاسازی می‌کند.
+    اگر خواستی بعداً از پایپلاین خودِ DezAlty (Deezer) استفاده کنی، فقط همین
+    تابع را عوض کن (کافی است مسیر یک فایل mp3 معتبر را برگردانی).
     """
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     for f in DOWNLOAD_DIR.glob("*"):
@@ -150,13 +153,12 @@ def download_song(query):
     ]
     yt_common = common + cookies_args
 
-    # چند منبع/کلاینت را به ترتیب امتحان می‌کنیم. اگر یوتیوب گیر داد،
-    # خودکار سراغ ساندکلاد می‌رویم که مشکل بات/جاوااسکریپت ندارد.
+    # ساندکلاد را اول امتحان می‌کنیم چون مشکل بات/جاوااسکریپت ندارد و سریع است.
+    # یوتیوب فقط به‌عنوان پشتیبان (روی سرور گیت‌هاب اغلب توسط یوتیوب محدود می‌شود).
     strategies = [
+        ("ساندکلاد", common + [f"scsearch1:{query}"]),
         ("یوتیوب default", yt_common + ["--extractor-args", "youtube:player_client=default,-tv", f"ytsearch1:{query}"]),
         ("یوتیوب ios", yt_common + ["--extractor-args", "youtube:player_client=ios", f"ytsearch1:{query}"]),
-        ("یوتیوب android", yt_common + ["--extractor-args", "youtube:player_client=android", f"ytsearch1:{query}"]),
-        ("ساندکلاد", common + [f"scsearch1:{query}"]),
     ]
 
     last_output = ""
@@ -223,14 +225,31 @@ def send_message(text):
 
 
 # ------------------------ اجرای اصلی ------------------------
+MAX_SONG_ATTEMPTS = 4  # اگر آهنگی دانلود نشد، چند آهنگ دیگر امتحان کن
+
+
 def main():
     history = load_history()
 
-    song = choose_song(history)
-    print(f"🎯 آهنگ انتخاب‌شده: {song['artist']} — {song['title']}")
+    mp3 = None
+    song = None
+    tried = []
+    for i in range(MAX_SONG_ATTEMPTS):
+        song = choose_song(history, avoid=tried)
+        label = f"{song['artist']} - {song['title']}"
+        print(f"🎯 ({i + 1}/{MAX_SONG_ATTEMPTS}) آهنگ: {label}")
+        try:
+            mp3 = download_song(song["search_query"])
+            print(f"⬇️  دانلود شد: {mp3.name}")
+            break
+        except RuntimeError as e:
+            print(f"⚠️  این آهنگ دانلود نشد: {e}", file=sys.stderr)
+            print("🔁 یک آهنگ دیگر انتخاب می‌کنم...", file=sys.stderr)
+            tried.append(label.lower())
+            mp3 = None
 
-    mp3 = download_song(song["youtube_query"])
-    print(f"⬇️  دانلود شد: {mp3.name}")
+    if not mp3 or not song:
+        raise RuntimeError("بعد از چند تلاش، هیچ آهنگی قابل دانلود نبود.")
 
     story = write_story(song)
     print("✍️  داستان نوشته شد")
