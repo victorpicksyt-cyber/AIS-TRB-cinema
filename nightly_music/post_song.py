@@ -385,10 +385,11 @@ def main():
 
     # داستان: اول وب را می‌گردیم، بعد فقط بر اساس نتایجِ واقعی می‌نویسیم
     research = research_story(track["title"], track["artist"])
-    track["story"] = research["story"]
     if research["has_real_story"]:
+        track["story"] = f"📖 داستان این آهنگ:\n\n{research['story']}"
         print("📖 داستان واقعی (از روی نتایج وب) نوشته شد")
     else:
+        track["story"] = research["story"]
         print("✍️  داستان واقعی پیدا نشد؛ متن احساسی نوشته شد")
 
     # نام انگلیسی برای متادیتای فایل + گذاشتن آیدی کانال کنار نام آهنگ
