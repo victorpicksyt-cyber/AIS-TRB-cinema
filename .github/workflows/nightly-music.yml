@@ -28,7 +28,9 @@ jobs:
           deno-version: v2.x
 
       - name: Install dependencies
-        run: pip install -r nightly_music/requirements.txt
+        run: |
+          pip install -r nightly_music/requirements.txt
+          pip install -U --pre "yt-dlp[default]"
 
       - name: Post nightly song
         env:
