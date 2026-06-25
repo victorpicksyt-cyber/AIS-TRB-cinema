@@ -140,6 +140,15 @@ def download_song(query):
         "--no-warnings",
         "-o", out_template,
     ]
+
+    # عبور از محدودیت «ربات نیستی» یوتیوب با کوکی.
+    # روی سرور گیت‌هاب (IP دیتاسنتر) این بخش تقریباً ضروری است.
+    cookies_data = os.environ.get("YOUTUBE_COOKIES", "").strip()
+    if cookies_data:
+        cookies_file = DOWNLOAD_DIR / "cookies.txt"
+        cookies_file.write_text(cookies_data + "\n", encoding="utf-8")
+        cmd += ["--cookies", str(cookies_file)]
+
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         print(result.stdout)
