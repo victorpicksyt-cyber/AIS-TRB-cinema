@@ -1,11 +1,7 @@
 name: Nightly Music
 
 on:
-  schedule:
-    # ساعت ۲۱:۰۰ به وقت ایران (UTC+3:30) برابر است با ۱۷:۳۰ UTC
-    # اگر زمان دیگری می‌خواهی، فقط این خط را عوض کن (به وقت UTC بنویس).
-    - cron: "30 17 * * *"
-  workflow_dispatch:   # دکمه‌ی اجرای دستی برای تست
+  workflow_dispatch:   # هم برای تست دستی، هم برای تریگر از cron-job.org
 
 permissions:
   contents: write   # برای ذخیره‌ی تاریخچه‌ی آهنگ‌ها در ریپو
@@ -34,7 +30,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
-          AI_MODEL: "openai/gpt-4o"
+          AI_MODEL: "openai/gpt-4.1"
           STORY_LANGUAGE: "Persian (Farsi)"
         run: python nightly_music/post_song.py
 
