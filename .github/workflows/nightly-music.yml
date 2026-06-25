@@ -30,6 +30,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
           AI_MODEL: "openai/gpt-4.1"
           STORY_LANGUAGE: "Persian (Farsi)"
         run: python nightly_music/post_song.py
