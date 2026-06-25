@@ -200,21 +200,17 @@ def _read_info():
     return {"title": real_title.strip(), "artist": real_artist.strip()}
 
 
-# --------------- شناسایی آهنگ واقعی + داستان (بر اساس فایل دانلودشده) ---------------
+# --------------- شناسایی آهنگ واقعی (بر اساس فایل دانلودشده) ---------------
 def describe_track(real_title, real_artist_hint, seed):
     """
-    بر اساس عنوانِ واقعیِ فایلِ دانلودشده، اسم تمیز آهنگ/خواننده و داستان را می‌سازد.
+    فقط اسم تمیزِ آهنگ و خواننده را از روی عنوانِ واقعیِ فایلِ دانلودشده استخراج می‌کند.
     چون ورودی، عنوانِ واقعیِ همان فایل است، اسم نمایش‌داده‌شده دقیقاً با خودِ آهنگ می‌خواند.
     """
     system = (
         "تو یک متخصص موسیقی هستی. عنوان خامِ یک فایل صوتیِ دانلودشده به تو داده می‌شود "
-        "(که از یوتیوب یا ساندکلاد آمده و ممکن است شلوغ باشد). وظیفه‌ات: "
-        "۱) اسم تمیزِ آهنگ و خواننده‌ی واقعی را از روی همین عنوان استخراج کنی (نه چیز دیگر). "
-        "۲) اگر داستانِ واقعی، مستند و درستی از همین آهنگ می‌دانی، آن را روایت کنی. "
-        "بسیار مهم: هرگز داستان از خودت نساز و هیچ اطلاعات نادرستی نده. فقط وقتی has_real_story "
-        "را true بگذار که کاملاً مطمئنی داستان واقعی و درست است. در غیر این صورت false بگذار "
-        "و در story یک متن کوتاهِ احساسی (حداکثر ۳ خط) بنویس که شنونده را مشتاق کند. "
-        "اگر از روی عنوان نمی‌توانی آهنگ را تشخیص دهی، اسم را همان‌طور که هست تمیز کن."
+        "(از یوتیوب یا ساندکلاد، ممکن است شلوغ باشد). فقط اسم تمیزِ آهنگ و خواننده‌ی "
+        "واقعی را از روی همین عنوان استخراج کن (نه چیز دیگر و نه از خودت). "
+        "اگر از روی عنوان نمی‌توانی تشخیص دهی، همان را تمیز کن."
     )
     user = (
         f"عنوان خام فایل دانلودشده: «{real_title}»\n"
@@ -225,19 +221,81 @@ def describe_track(real_title, real_artist_hint, seed):
         '  "title": "اسم تمیز آهنگ به زبان اصلی",\n'
         '  "artist": "اسم تمیز خواننده به زبان اصلی",\n'
         '  "title_en": "اسم آهنگ به انگلیسی/لاتین",\n'
-        '  "artist_en": "اسم خواننده به انگلیسی/لاتین",\n'
-        '  "has_real_story": true یا false,\n'
-        '  "story": "داستان واقعی (۴ تا ۶ خط) اگر مطمئنی؛ وگرنه متن احساسی کوتاه (۳ خط)"\n'
+        '  "artist_en": "اسم خواننده به انگلیسی/لاتین"\n'
         "}"
     )
-    raw = ai_chat(system, user, max_tokens=700, temperature=0.85, json_mode=True)
+    raw = ai_chat(system, user, max_tokens=300, temperature=0.4, json_mode=True)
     data = parse_json(raw)
-    # پشتیبان: اگر چیزی خالی ماند، از عنوان واقعی/seed استفاده کن
     data["title"] = (data.get("title") or real_title or seed).strip()
     data["artist"] = (data.get("artist") or real_artist_hint).strip()
     data["title_en"] = (data.get("title_en") or data["title"]).strip()
     data["artist_en"] = (data.get("artist_en") or data["artist"]).strip()
+    return data
+
+
+# --------------- جستجوی وب (رایگان، بدون کلید) ---------------
+def web_search(query, max_results=4):
+    """با DuckDuckGo جستجو می‌کند. بهترین‌تلاش؛ اگر شکست خورد لیست خالی برمی‌گرداند."""
+    try:
+        try:
+            from ddgs import DDGS
+        except ImportError:
+            from duckduckgo_search import DDGS
+        results = list(DDGS().text(query, max_results=max_results))
+        return [
+            {"title": r.get("title", ""), "body": r.get("body", "")}
+            for r in results
+        ]
+    except Exception as e:
+        print(f"[web] جستجو ناموفق برای «{query}»: {e}", file=sys.stderr)
+        return []
+
+
+# --------------- داستان واقعی، گراندد روی نتایج وب ---------------
+def research_story(title, artist):
+    """
+    اول وب را درباره‌ی داستانِ آهنگ می‌گردد، سپس داستان را «فقط» بر اساس همان نتایج
+    می‌نویسد. اگر داستان واقعی پیدا نشد، یک متن احساسی کوتاه می‌نویسد.
+    """
+    queries = [
+        f"{artist} {title} داستان پشت آهنگ",
+        f"{artist} {title} ماجرای آهنگ معنی",
+        f"{artist} {title} song story behind meaning",
+    ]
+    snippets = []
+    for q in queries:
+        for r in web_search(q, max_results=4):
+            line = f"- {r['title']}: {r['body']}".strip()
+            if line and line not in snippets:
+                snippets.append(line)
+        if len(snippets) >= 10:
+            break
+
+    snippets_text = "\n".join(snippets[:12]) if snippets else "(نتیجه‌ای یافت نشد)"
+    print(f"[web] {len(snippets)} نتیجه برای داستان پیدا شد")
+
+    system = (
+        f"تو یک نویسنده‌ی موسیقی هستی و به زبان {STORY_LANGUAGE} می‌نویسی. "
+        "بر اساس «فقط» نتایج جستجوی وبی که داده می‌شود تصمیم بگیر: "
+        "اگر در نتایج، داستانِ واقعی و مستندی پشت این آهنگ هست (ماجرای ساخت، الهام، معنی "
+        "واقعی ترانه و...)، آن را در ۴ تا ۶ خط گرم و گیرا روایت کن و has_real_story=true بگذار. "
+        "اگر نتایج داستانِ واقعیِ روشنی ندارند، has_real_story=false بگذار و یک متن کوتاهِ "
+        "احساسی (حداکثر ۳ خط) بنویس که شنونده را به شنیدن آهنگ مشتاق کند. "
+        "هرگز از دانش بیرونی یا حدس استفاده نکن و هیچ چیز را از خودت به‌عنوان واقعیت جا نزن. "
+        "نام آهنگ و خواننده را داخل متن تکرار نکن (جداگانه می‌آید). حداکثر ۱ تا ۲ ایموجی."
+    )
+    user = (
+        f"آهنگ: «{title}» از «{artist}».\n\n"
+        f"نتایج جستجوی وب:\n{snippets_text}\n\n"
+        'خروجی را فقط JSON بده: {"has_real_story": true یا false, "story": "..."}'
+    )
+    raw = ai_chat(system, user, max_tokens=600, temperature=0.7, json_mode=True)
+    data = parse_json(raw)
+    data["has_real_story"] = bool(data.get("has_real_story"))
     data["story"] = (data.get("story") or "").strip()
+    if not data["story"]:
+        data["has_real_story"] = False
+        data["story"] = "همین حالا گوشش کن؛ بعضی آهنگ‌ها را باید شنید، نه توضیح داد. 🎧"
     return data
 
 
@@ -317,16 +375,21 @@ def main():
     if not mp3 or not info:
         raise RuntimeError("بعد از چند تلاش، هیچ آهنگی قابل دانلود نبود.")
 
-    # شناساییِ آهنگِ واقعی + داستان، بر اساس عنوانِ همان فایلی که دانلود شد
+    # شناساییِ آهنگِ واقعی بر اساس عنوانِ همان فایلی که دانلود شد
     track = describe_track(
         info.get("title", ""),
         info.get("artist", ""),
         seed["search_query"],
     )
-    if track.get("has_real_story"):
-        print(f"📖 داستان واقعی: {track['artist']} — {track['title']}")
+    print(f"🎼 شناسایی شد: {track['artist']} — {track['title']}")
+
+    # داستان: اول وب را می‌گردیم، بعد فقط بر اساس نتایجِ واقعی می‌نویسیم
+    research = research_story(track["title"], track["artist"])
+    track["story"] = research["story"]
+    if research["has_real_story"]:
+        print("📖 داستان واقعی (از روی نتایج وب) نوشته شد")
     else:
-        print(f"✍️  داستان احساسی: {track['artist']} — {track['title']}")
+        print("✍️  داستان واقعی پیدا نشد؛ متن احساسی نوشته شد")
 
     # نام انگلیسی برای متادیتای فایل + گذاشتن آیدی کانال کنار نام آهنگ
     title_en = track["title_en"]
