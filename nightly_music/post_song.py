@@ -18,6 +18,9 @@ from pathlib import Path
 
 import requests
 from openai import OpenAI
+from mutagen.easyid3 import EasyID3
+from mutagen.id3 import ID3NoHeaderError
+from mutagen.mp3 import MP3
 
 # ---------------------------- تنظیمات ----------------------------
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
@@ -27,6 +30,9 @@ TELEGRAM_CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
 AI_MODEL = os.environ.get("AI_MODEL", "openai/gpt-4o")
 STORY_LANGUAGE = os.environ.get("STORY_LANGUAGE", "Persian (Farsi)")
 MODELS_ENDPOINT = "https://models.github.ai/inference"
+
+# تگ کانال که هم در فیلد آلبومِ فایل و هم در آخر پیام می‌آید
+CHANNEL_TAG = "@RadioBulletin |  رادیو بولتن"
 
 HISTORY_FILE = Path(__file__).parent / "sent_history.json"
 DOWNLOAD_DIR = Path("/tmp/song")
@@ -180,19 +186,37 @@ def download_song(query):
 # ------------------------ نوشتن داستان احساسی ------------------------
 def write_story(song):
     system = (
-        f"تو یک نویسنده‌ی احساسی و قصه‌گو هستی و به زبان {STORY_LANGUAGE} می‌نویسی. "
-        "برای یک کانال موسیقی، داستان یا حال‌وهوای احساسی پشت یک آهنگ را روایت می‌کنی. "
-        "لحن گرم، شاعرانه و تأثیرگذار باشد اما اغراق‌نشده و باورپذیر. "
-        "اگر داستان واقعی پشت آهنگ را می‌دانی روایتش کن؛ وگرنه فضا و حسّ آهنگ را زیبا توصیف کن. "
-        "هرگز اطلاعات نادرست یا ساختگی به عنوان واقعیت جا نزن. "
-        "طول متن حداکثر حدود ۸۰۰ کاراکتر باشد تا در کپشن تلگرام جا شود. "
-        "می‌توانی از چند ایموجی مناسب استفاده کنی. متن خام بنویس، بدون عنوان یا فرمت اضافه."
+        f"تو یک نویسنده‌ی احساسی و حرفه‌ای هستی و به زبان {STORY_LANGUAGE} می‌نویسی. "
+        "برای یک کانال موسیقی متنی خیلی کوتاه می‌نویسی (حداکثر ۳ خط). "
+        "هدف: کاری کنی که خواننده با خواندنش حس کند این آهنگ دقیقاً برای یک لحظه یا "
+        "صحنه‌ی خاصِ زندگی‌اش ساخته شده و همان لحظه دلش بخواهد گوشش کند — "
+        "یعنی یک صحنه یا حسِ ملموس و قابل‌لمس بساز، نه توصیف کلی. "
+        "لحن شاعرانه، گرم و تأثیرگذار اما بدون اغراق و کلیشه. "
+        "نام آهنگ و خواننده را داخل متن نیاور (جداگانه می‌آید). "
+        "حداکثر ۱ تا ۲ ایموجی. فقط خودِ متن را بنویس، بدون عنوان یا علامت نقل‌قول."
     )
     user = (
         f"آهنگ: «{song['title']}» از {song['artist']}.\n"
-        "یک متن کوتاه و احساسی درباره‌ی این آهنگ بنویس."
+        "یک متن خیلی کوتاه (حداکثر ۳ خط) بنویس که خواننده را به شنیدن آهنگ مشتاق کند."
     )
-    return ai_chat(system, user, max_tokens=700, temperature=0.9)
+    return ai_chat(system, user, max_tokens=300, temperature=0.95)
+
+
+# ------------------------ ست‌کردن فیلد آلبوم ------------------------
+def set_album_tag(mp3_path, album):
+    """فیلد «آلبوم» داخل فایل mp3 را تنظیم می‌کند (در دیتیلِ پلیر تلگرام دیده می‌شود)."""
+    try:
+        try:
+            tags = EasyID3(str(mp3_path))
+        except ID3NoHeaderError:
+            audio = MP3(str(mp3_path))
+            audio.add_tags()
+            audio.save()
+            tags = EasyID3(str(mp3_path))
+        tags["album"] = album
+        tags.save()
+    except Exception as e:
+        print(f"[album] هشدار: ست‌کردن آلبوم نشد: {e}", file=sys.stderr)
 
 
 # ------------------------ ارسال به تلگرام ------------------------
@@ -251,22 +275,33 @@ def main():
     if not mp3 or not song:
         raise RuntimeError("بعد از چند تلاش، هیچ آهنگی قابل دانلود نبود.")
 
+    # فیلد آلبومِ فایل را روی تگ کانال می‌گذاریم
+    set_album_tag(mp3, CHANNEL_TAG)
+
     story = write_story(song)
     print("✍️  داستان نوشته شد")
 
     title = html.escape(song["title"])
     artist = html.escape(song["artist"])
-    story_safe = html.escape(story)
+    story_safe = html.escape(story.strip())
+    tag_safe = html.escape(CHANNEL_TAG)
 
-    header = f"🎵 <b>{title}</b>\n🎤 {artist}\n\n"
-    full_caption = header + story_safe
+    # چیدمان: داستانِ بولد → کوتِ خواننده/آهنگ → تگ کانالِ بولد
+    caption = (
+        f"<b>{story_safe}</b>\n\n"
+        f"<blockquote>🎵 {artist} — {title}</blockquote>\n\n"
+        f"<b>{tag_safe}</b>"
+    )
 
-    if len(full_caption) <= 1024:
-        send_audio(mp3, song["title"], song["artist"], full_caption)
+    if len(caption) <= 1024:
+        send_audio(mp3, song["title"], song["artist"], caption)
     else:
-        # اگر داستان طولانی شد: اول آهنگ، بعد داستان در پیام جدا
-        send_audio(mp3, song["title"], song["artist"], header.strip())
-        send_message(story_safe)
+        # حالت نادر (داستان خیلی بلند): آهنگ با کوت+تگ، داستان در پیام جدا
+        short_caption = (
+            f"<blockquote>🎵 {artist} — {title}</blockquote>\n\n<b>{tag_safe}</b>"
+        )
+        send_audio(mp3, song["title"], song["artist"], short_caption)
+        send_message(f"<b>{story_safe}</b>")
     print("📨 ارسال شد به کانال")
 
     key = f"{song['artist']} - {song['title']}".lower()
