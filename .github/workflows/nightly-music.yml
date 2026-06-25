@@ -1,0 +1,47 @@
+name: Nightly Music
+
+on:
+  schedule:
+    # ساعت ۲۱:۰۰ به وقت ایران (UTC+3:30) برابر است با ۱۷:۳۰ UTC
+    # اگر زمان دیگری می‌خواهی، فقط این خط را عوض کن (به وقت UTC بنویس).
+    - cron: "30 17 * * *"
+  workflow_dispatch:   # دکمه‌ی اجرای دستی برای تست
+
+permissions:
+  contents: write   # برای ذخیره‌ی تاریخچه‌ی آهنگ‌ها در ریپو
+  models: read      # برای استفاده از GitHub Models (هوش مصنوعی رایگان گیت‌هاب)
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install dependencies
+        run: pip install -r nightly_music/requirements.txt
+
+      - name: Post nightly song
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          AI_MODEL: "openai/gpt-4o"
+          STORY_LANGUAGE: "Persian (Farsi)"
+        run: python nightly_music/post_song.py
+
+      - name: Save history
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add nightly_music/sent_history.json
+          git diff --staged --quiet || git commit -m "chore: update sent songs history"
+          git push
