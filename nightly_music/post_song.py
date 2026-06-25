@@ -131,34 +131,49 @@ def download_song(query):
         f.unlink()
 
     out_template = str(DOWNLOAD_DIR / "track.%(ext)s")
-    cmd = [
-        "yt-dlp",
-        f"ytsearch1:{query}",
-        "--no-playlist",
-        "-x", "--audio-format", "mp3", "--audio-quality", "0",
-        "--embed-thumbnail", "--embed-metadata",
-        "--no-warnings",
-        "-o", out_template,
-    ]
 
-    # عبور از محدودیت «ربات نیستی» یوتیوب با کوکی.
-    # روی سرور گیت‌هاب (IP دیتاسنتر) این بخش تقریباً ضروری است.
+    # کوکی برای عبور از محدودیت «ربات نیستی» یوتیوب (روی سرور گیت‌هاب لازم است).
+    cookies_args = []
     cookies_data = os.environ.get("YOUTUBE_COOKIES", "").strip()
     if cookies_data:
         cookies_file = DOWNLOAD_DIR / "cookies.txt"
         cookies_file.write_text(cookies_data + "\n", encoding="utf-8")
-        cmd += ["--cookies", str(cookies_file)]
+        cookies_args = ["--cookies", str(cookies_file)]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(result.stdout)
-        print(result.stderr, file=sys.stderr)
-        raise RuntimeError("دانلود آهنگ از یوتیوب شکست خورد.")
+    base = [
+        "yt-dlp",
+        f"ytsearch1:{query}",
+        "--no-playlist",
+        "-f", "bestaudio/best",
+        "-x", "--audio-format", "mp3", "--audio-quality", "0",
+        "--embed-thumbnail", "--embed-metadata",
+        "--no-warnings",
+        "-o", out_template,
+    ] + cookies_args
 
-    mp3s = list(DOWNLOAD_DIR.glob("*.mp3"))
-    if not mp3s:
-        raise RuntimeError("فایل mp3 ساخته نشد.")
-    return mp3s[0]
+    # چند کلاینت مختلف یوتیوب را به ترتیب امتحان می‌کنیم تا از خطای
+    # «Requested format is not available» و پلیرِ downgraded عبور کنیم.
+    client_strategies = [
+        ["--extractor-args", "youtube:player_client=default,-tv"],
+        ["--extractor-args", "youtube:player_client=web_safari"],
+        ["--extractor-args", "youtube:player_client=ios"],
+        ["--extractor-args", "youtube:player_client=android"],
+    ]
+
+    last_output = ""
+    for extra in client_strategies:
+        for old in DOWNLOAD_DIR.glob("*.mp3"):
+            old.unlink()
+        result = subprocess.run(base + extra, capture_output=True, text=True)
+        last_output = result.stdout + "\n" + result.stderr
+        mp3s = list(DOWNLOAD_DIR.glob("*.mp3"))
+        if result.returncode == 0 and mp3s:
+            print(f"[download] موفق با {extra[1]}")
+            return mp3s[0]
+        print(f"[download] شکست با {extra[1]} — تلاش بعدی...", file=sys.stderr)
+
+    print(last_output, file=sys.stderr)
+    raise RuntimeError("دانلود آهنگ از یوتیوب با همه‌ی روش‌ها شکست خورد.")
 
 
 # ------------------------ نوشتن داستان احساسی ------------------------
