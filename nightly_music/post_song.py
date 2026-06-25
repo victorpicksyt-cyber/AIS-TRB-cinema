@@ -33,6 +33,7 @@ MODELS_ENDPOINT = "https://models.github.ai/inference"
 
 # تگ کانال که هم در فیلد آلبومِ فایل و هم در آخر پیام می‌آید
 CHANNEL_TAG = "@RadioBulletin |  رادیو بولتن"
+CHANNEL_ID = "@RadioBulletin"  # کنار نام آهنگ در فایل می‌آید
 
 HISTORY_FILE = Path(__file__).parent / "sent_history.json"
 DOWNLOAD_DIR = Path("/tmp/song")
@@ -97,33 +98,43 @@ def choose_song(history, avoid=None):
         recent = recent + list(avoid)
     system = (
         "تو یک کیوریتور موسیقی حرفه‌ای برای یک کانال تلگرامی با مخاطب ایرانی هستی. "
-        "هر شب یک آهنگ انتخاب می‌کنی که حداقل یکی از این ویژگی‌ها را داشته باشد: "
-        "۱) پشتش یک داستان واقعی و احساسی جذاب باشد، "
-        "۲) این روزها ترند و محبوب باشد، "
-        "۳) باب میل و سلیقه‌ی مخاطب ایرانی باشد. "
-        "ترکیبی متنوع از آهنگ‌های فارسی/ایرانی و بین‌المللی انتخاب کن و خودت را به یک سبک محدود نکن. "
-        "آهنگ‌های واقعی و شناخته‌شده انتخاب کن که احتمال پیدا شدنشان در سرویس‌های موسیقی بالا باشد. "
-        "آهنگ‌هایی که در لیست «انتخاب نکن» آمده‌اند را دوباره انتخاب نکن."
+        "اولویت اولِ تو این است: آهنگی انتخاب کنی که پشتش یک «داستان واقعی، مستند و جذاب» "
+        "وجود دارد که تو واقعاً از درستی‌اش مطمئنی — مثل ماجرای ساخته‌شدن آهنگ، اتفاقی که "
+        "الهام‌بخشش بوده، یا داستان واقعی پشت متن ترانه. اگر چنین آهنگی پیدا کردی که در لیست "
+        "«انتخاب نکن» نیست، has_real_story را true بگذار و آن داستانِ واقعی را در فیلد story "
+        "بنویس (۴ تا ۶ خط). فقط وقتی true بگذار که مطمئنی داستان واقعی و درست است؛ هرگز داستان "
+        "از خودت نساز و به‌عنوان واقعیت جا نزن. "
+        "اگر آهنگِ تازه‌ای با داستان واقعی پیدا نکردی یا همه‌شان قبلاً فرستاده شده‌اند، یک آهنگ "
+        "خوب دیگر انتخاب کن (ترند، محبوب یا باب میل مخاطب ایرانی)، has_real_story را false و "
+        "story را خالی بگذار. "
+        "ترکیبی متنوع از آهنگ‌های فارسی و بین‌المللی، و آهنگ‌های شناخته‌شده که در سرویس‌های "
+        "موسیقی پیدا می‌شوند انتخاب کن."
     )
     user = (
         "یک آهنگ برای امشب انتخاب کن و خروجی را فقط به صورت JSON بده با این کلیدها:\n"
         "{\n"
-        '  "title": "نام دقیق آهنگ",\n'
-        '  "artist": "نام خواننده",\n'
+        '  "title": "نام آهنگ به زبان اصلی",\n'
+        '  "artist": "نام خواننده به زبان اصلی",\n'
+        '  "title_en": "نام آهنگ به انگلیسی/لاتین (برای آهنگ فارسی، فینگلیش)",\n'
+        '  "artist_en": "نام خواننده به انگلیسی/لاتین",\n'
         '  "language": "fa یا en یا ...",\n'
-        '  "search_query": "عبارت جستجوی تمیز فقط شامل نام خواننده و نام آهنگ '
-        '(به انگلیسی/فینگلیش اگر خواننده بین‌المللی است). بدون کلماتی مثل '
-        'official، audio، video، lyrics، HD",\n'
+        '  "search_query": "عبارت جستجوی تمیز فقط نام خواننده و نام آهنگ، '
+        'بدون کلماتی مثل official/audio/video/lyrics/HD",\n'
+        '  "has_real_story": true یا false,\n'
+        '  "story": "اگر has_real_story=true بود، داستان واقعی (۴ تا ۶ خط)؛ وگرنه خالی",\n'
         '  "reason": "در یک جمله کوتاه چرا این آهنگ"\n'
         "}\n\n"
         f"آهنگ‌هایی که نباید انتخاب کنی:\n"
         f"{json.dumps(recent, ensure_ascii=False)}"
     )
-    raw = ai_chat(system, user, max_tokens=400, temperature=1.0, json_mode=True)
+    raw = ai_chat(system, user, max_tokens=700, temperature=1.0, json_mode=True)
     song = parse_json(raw)
     for k in ("title", "artist", "search_query"):
         if not song.get(k):
             raise RuntimeError(f"خروجی هوش مصنوعی ناقص بود (کلید «{k}» نبود).")
+    # اگر نسخه‌ی انگلیسی نداد، از همان زبان اصلی استفاده می‌کنیم
+    song["title_en"] = (song.get("title_en") or song["title"]).strip()
+    song["artist_en"] = (song.get("artist_en") or song["artist"]).strip()
     return song
 
 
@@ -202,9 +213,9 @@ def write_story(song):
     return ai_chat(system, user, max_tokens=300, temperature=0.95)
 
 
-# ------------------------ ست‌کردن فیلد آلبوم ------------------------
-def set_album_tag(mp3_path, album):
-    """فیلد «آلبوم» داخل فایل mp3 را تنظیم می‌کند (در دیتیلِ پلیر تلگرام دیده می‌شود)."""
+# ------------------------ ست‌کردن متادیتای فایل ------------------------
+def set_file_tags(mp3_path, title, artist, album):
+    """عنوان/خواننده/آلبومِ فایل mp3 را تنظیم می‌کند (در پلیر تلگرام دیده می‌شود)."""
     try:
         try:
             tags = EasyID3(str(mp3_path))
@@ -213,10 +224,12 @@ def set_album_tag(mp3_path, album):
             audio.add_tags()
             audio.save()
             tags = EasyID3(str(mp3_path))
+        tags["title"] = title
+        tags["artist"] = artist
         tags["album"] = album
         tags.save()
     except Exception as e:
-        print(f"[album] هشدار: ست‌کردن آلبوم نشد: {e}", file=sys.stderr)
+        print(f"[tags] هشدار: ست‌کردن متادیتا نشد: {e}", file=sys.stderr)
 
 
 # ------------------------ ارسال به تلگرام ------------------------
@@ -275,15 +288,23 @@ def main():
     if not mp3 or not song:
         raise RuntimeError("بعد از چند تلاش، هیچ آهنگی قابل دانلود نبود.")
 
-    # فیلد آلبومِ فایل را روی تگ کانال می‌گذاریم
-    set_album_tag(mp3, CHANNEL_TAG)
+    # نام انگلیسی برای متادیتای فایل + گذاشتن آیدی کانال کنار نام آهنگ
+    title_en = song["title_en"]
+    artist_en = song["artist_en"]
+    file_title = f"{title_en} | {CHANNEL_ID}"
+    set_file_tags(mp3, file_title, artist_en, CHANNEL_TAG)
 
-    story = write_story(song)
-    print("✍️  داستان نوشته شد")
+    # داستان: اگر داستان واقعی موجود بود همان را می‌فرستیم، وگرنه خودمان می‌نویسیم
+    if song.get("has_real_story") and song.get("story", "").strip():
+        story = song["story"].strip()
+        print("📖 داستان واقعی پیدا شد")
+    else:
+        story = write_story(song)
+        print("✍️  داستان احساسی نوشته شد")
 
     title = html.escape(song["title"])
     artist = html.escape(song["artist"])
-    story_safe = html.escape(story.strip())
+    story_safe = html.escape(story)
     tag_safe = html.escape(CHANNEL_TAG)
 
     # چیدمان: داستانِ بولد → کوتِ خواننده/آهنگ → تگ کانالِ بولد
@@ -294,13 +315,13 @@ def main():
     )
 
     if len(caption) <= 1024:
-        send_audio(mp3, song["title"], song["artist"], caption)
+        send_audio(mp3, file_title, artist_en, caption)
     else:
         # حالت نادر (داستان خیلی بلند): آهنگ با کوت+تگ، داستان در پیام جدا
         short_caption = (
             f"<blockquote>🎵 {artist} — {title}</blockquote>\n\n<b>{tag_safe}</b>"
         )
-        send_audio(mp3, song["title"], song["artist"], short_caption)
+        send_audio(mp3, file_title, artist_en, short_caption)
         send_message(f"<b>{story_safe}</b>")
     print("📨 ارسال شد به کانال")
 
