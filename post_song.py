@@ -1,0 +1,461 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+هر شب یک آهنگ هوشمند انتخاب می‌کند، فایل کامل آن را دانلود می‌کند،
+یک داستان احساسی پشت موسیقی می‌نویسد و همه را در کانال تلگرام می‌فرستد.
+
+موتور هوش مصنوعی: GitHub Models (رایگان، با همان توکن گیت‌هاب)
+"""
+
+import html
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import requests
+from openai import OpenAI
+from mutagen.easyid3 import EasyID3
+from mutagen.id3 import ID3NoHeaderError
+from mutagen.mp3 import MP3
+
+# ---------------------------- تنظیمات ----------------------------
+GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
+TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+TELEGRAM_CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
+
+AI_MODEL = os.environ.get("AI_MODEL", "openai/gpt-4o")
+STORY_LANGUAGE = os.environ.get("STORY_LANGUAGE", "Persian (Farsi)")
+MODELS_ENDPOINT = "https://models.github.ai/inference"
+
+# تگ کانال که هم در فیلد آلبومِ فایل و هم در آخر پیام می‌آید
+CHANNEL_TAG = "@RadioBulletin |  رادیو بولتن"
+CHANNEL_ID = "@RadioBulletin"  # کنار نام آهنگ در فایل می‌آید
+
+HISTORY_FILE = Path(__file__).parent / "sent_history.json"
+DOWNLOAD_DIR = Path("/tmp/song")
+MAX_HISTORY = 200  # چند آهنگ آخر را به هوش مصنوعی بدهیم تا تکرار نشود
+MIN_DURATION = 90  # ثانیه؛ فایل کوتاه‌تر = پیش‌نمایش، نه آهنگ کامل
+
+client = OpenAI(base_url=MODELS_ENDPOINT, api_key=GITHUB_TOKEN)
+
+
+# ------------------------ ابزار هوش مصنوعی ------------------------
+def ai_chat(system, user, max_tokens=900, temperature=0.9, json_mode=False, retries=4):
+    """یک درخواست به GitHub Models با backoff برای محدودیت نرخ (rate limit)."""
+    for attempt in range(retries):
+        try:
+            kwargs = dict(
+                model=AI_MODEL,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            if json_mode:
+                kwargs["response_format"] = {"type": "json_object"}
+            resp = client.chat.completions.create(**kwargs)
+            return resp.choices[0].message.content.strip()
+        except Exception as e:
+            wait = (2 ** attempt) * 5
+            print(f"[AI] خطا (تلاش {attempt + 1}): {e} — {wait}s صبر...", file=sys.stderr)
+            time.sleep(wait)
+    raise RuntimeError("درخواست هوش مصنوعی بعد از چند تلاش شکست خورد.")
+
+
+def parse_json(raw):
+    """JSON را حتی اگر داخل ```fence``` باشد می‌خواند."""
+    raw = raw.strip()
+    raw = re.sub(r"^```(json)?", "", raw).strip()
+    raw = re.sub(r"```$", "", raw).strip()
+    return json.loads(raw)
+
+
+# ------------------------ تاریخچه‌ی آهنگ‌ها ------------------------
+def load_history():
+    if HISTORY_FILE.exists():
+        try:
+            return json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return []
+    return []
+
+
+def save_history(history):
+    HISTORY_FILE.write_text(
+        json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+# ------------------------ انتخاب هوشمند آهنگ ------------------------
+def choose_song(history, avoid=None):
+    recent = [h["key"] for h in history[-MAX_HISTORY:]]
+    if avoid:
+        recent = recent + list(avoid)
+    system = (
+        "تو یک کیوریتور موسیقی حرفه‌ای برای یک کانال تلگرامی با مخاطب ایرانی هستی. "
+        "آهنگ را با این اولویت انتخاب کن: "
+        "اولویت اول — آهنگی که پشتش یک «داستان واقعی و مستندِ جذاب» وجود دارد "
+        "(ماجرای ساختش، اتفاقی که الهام‌بخشش بوده، معنی واقعی ترانه و...). "
+        "اولویت دوم — اگر آهنگِ تازه‌ای با داستان واقعی پیدا نکردی، آهنگی انتخاب کن که به‌شدت "
+        "یک «حال یا موقعیتِ خاصِ زندگی» را تداعی می‌کند و وابستگیِ حسی می‌آورد — یعنی از آن "
+        "آهنگ‌هایی که آدم‌ها در لحظه‌های خاص (دلتنگی، دل‌شکستگی، نوستالژی، سرخوشی و...) گوش می‌دهند "
+        "و حس می‌کنند «انگار از حال من نوشته شده». "
+        "آهنگ‌های واقعی و شناخته‌شده انتخاب کن که در سرویس‌های موسیقی پیدا می‌شوند. "
+        "ترکیبی متنوع از فارسی و بین‌المللی. آهنگ‌های لیست «انتخاب نکن» را تکرار نکن."
+    )
+    user = (
+        "یک آهنگ پیشنهاد بده و خروجی را فقط JSON بده:\n"
+        "{\n"
+        '  "title": "نام آهنگ",\n'
+        '  "artist": "نام خواننده",\n'
+        '  "search_query": "عبارت جستجوی تمیز: فقط نام خواننده و نام آهنگ، '
+        'بدون کلماتی مثل official/audio/video/lyrics/HD"\n'
+        "}\n\n"
+        f"آهنگ‌هایی که نباید انتخاب کنی:\n"
+        f"{json.dumps(recent, ensure_ascii=False)}"
+    )
+    raw = ai_chat(system, user, max_tokens=300, temperature=1.0, json_mode=True)
+    song = parse_json(raw)
+    for k in ("title", "artist", "search_query"):
+        if not song.get(k):
+            raise RuntimeError(f"خروجی هوش مصنوعی ناقص بود (کلید «{k}» نبود).")
+    return song
+
+
+# ------------------------ دانلود آهنگ (ماژولار) ------------------------
+def download_song(query):
+    """
+    آهنگ را به mp3 دانلود می‌کند (اول ساندکلاد، بعد یوتیوب) و کاور + متادیتا
+    را داخل فایل جاسازی می‌کند.
+    اگر خواستی بعداً از پایپلاین خودِ DezAlty (Deezer) استفاده کنی، فقط همین
+    تابع را عوض کن (کافی است مسیر یک فایل mp3 معتبر را برگردانی).
+    """
+    DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    for f in DOWNLOAD_DIR.glob("*"):
+        f.unlink()
+
+    out_template = str(DOWNLOAD_DIR / "track.%(ext)s")
+
+    # کوکی برای عبور از محدودیت «ربات نیستی» یوتیوب (روی سرور گیت‌هاب لازم است).
+    cookies_args = []
+    cookies_data = os.environ.get("YOUTUBE_COOKIES", "").strip()
+    if cookies_data:
+        cookies_file = DOWNLOAD_DIR / "cookies.txt"
+        cookies_file.write_text(cookies_data + "\n", encoding="utf-8")
+        cookies_args = ["--cookies", str(cookies_file)]
+
+    common = [
+        "yt-dlp",
+        "--no-playlist",
+        "-f", "bestaudio/best",
+        "-x", "--audio-format", "mp3", "--audio-quality", "0",
+        "--embed-thumbnail", "--embed-metadata",
+        "--write-info-json",
+        "-o", out_template,
+    ]
+    yt_common = common + cookies_args
+
+    # ساندکلاد را اول امتحان می‌کنیم چون مشکل بات/جاوااسکریپت ندارد و سریع است.
+    # یوتیوب فقط به‌عنوان پشتیبان (روی سرور گیت‌هاب اغلب توسط یوتیوب محدود می‌شود).
+    strategies = [
+        ("ساندکلاد", common + [f"scsearch1:{query}"]),
+        ("یوتیوب default", yt_common + ["--extractor-args", "youtube:player_client=default,-tv", f"ytsearch1:{query}"]),
+        ("یوتیوب ios", yt_common + ["--extractor-args", "youtube:player_client=ios", f"ytsearch1:{query}"]),
+    ]
+
+    last_output = ""
+    for name, cmd in strategies:
+        for old in DOWNLOAD_DIR.glob("*.mp3"):
+            old.unlink()
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        last_output = result.stdout + "\n" + result.stderr
+        mp3s = list(DOWNLOAD_DIR.glob("*.mp3"))
+        if result.returncode == 0 and mp3s:
+            dur = _duration(mp3s[0])
+            if dur >= MIN_DURATION:
+                print(f"[download] ✅ موفق با: {name} ({int(dur)} ثانیه)")
+                return mp3s[0], _read_info()
+            # فایل کوتاه = پیش‌نمایش؛ ردش کن و سراغ منبع بعدی برو
+            print(f"[download] ⚠️ فقط پیش‌نمایش {int(dur)}s از «{name}» — رد شد", file=sys.stderr)
+        else:
+            print(f"[download] ❌ شکست با: {name} — تلاش بعدی...", file=sys.stderr)
+
+    print(last_output, file=sys.stderr)
+    raise RuntimeError("نسخه‌ی کاملِ آهنگ از هیچ منبعی پیدا نشد (فقط پیش‌نمایش/خطا).")
+
+
+def _duration(mp3_path):
+    """مدت زمان فایل mp3 را به ثانیه برمی‌گرداند (برای تشخیص پیش‌نمایش)."""
+    try:
+        return float(MP3(str(mp3_path)).info.length)
+    except Exception:
+        return 0.0
+
+
+def _read_info():
+    """متادیتای واقعیِ فایلِ دانلودشده را از فایل info.json می‌خواند."""
+    info = {}
+    for jf in DOWNLOAD_DIR.glob("*.info.json"):
+        try:
+            info = json.loads(jf.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        break
+    # عنوان و خواننده‌ی واقعیِ منبع
+    real_title = info.get("track") or info.get("title") or ""
+    real_artist = (
+        info.get("artist")
+        or info.get("uploader")
+        or info.get("channel")
+        or ""
+    )
+    return {"title": real_title.strip(), "artist": real_artist.strip()}
+
+
+# --------------- شناسایی آهنگ واقعی (بر اساس فایل دانلودشده) ---------------
+def describe_track(real_title, real_artist_hint, seed):
+    """
+    فقط اسم تمیزِ آهنگ و خواننده را از روی عنوانِ واقعیِ فایلِ دانلودشده استخراج می‌کند.
+    چون ورودی، عنوانِ واقعیِ همان فایل است، اسم نمایش‌داده‌شده دقیقاً با خودِ آهنگ می‌خواند.
+    """
+    system = (
+        "تو یک متخصص موسیقی هستی. عنوان خامِ یک فایل صوتیِ دانلودشده به تو داده می‌شود "
+        "(از یوتیوب یا ساندکلاد، ممکن است شلوغ باشد). فقط اسم تمیزِ آهنگ و خواننده‌ی "
+        "واقعی را از روی همین عنوان استخراج کن (نه چیز دیگر و نه از خودت). "
+        "اگر از روی عنوان نمی‌توانی تشخیص دهی، همان را تمیز کن."
+    )
+    user = (
+        f"عنوان خام فایل دانلودشده: «{real_title}»\n"
+        f"نام آپلودکننده/خواننده‌ی احتمالی: «{real_artist_hint}»\n"
+        f"(برای کمک، جستجوی اولیه این بود: «{seed}»)\n\n"
+        "خروجی را فقط JSON بده:\n"
+        "{\n"
+        '  "title": "اسم تمیز آهنگ به زبان اصلی",\n'
+        '  "artist": "اسم تمیز خواننده به زبان اصلی",\n'
+        '  "title_en": "اسم آهنگ به انگلیسی/لاتین",\n'
+        '  "artist_en": "اسم خواننده به انگلیسی/لاتین"\n'
+        "}"
+    )
+    raw = ai_chat(system, user, max_tokens=300, temperature=0.4, json_mode=True)
+    data = parse_json(raw)
+    data["title"] = (data.get("title") or real_title or seed).strip()
+    data["artist"] = (data.get("artist") or real_artist_hint).strip()
+    data["title_en"] = (data.get("title_en") or data["title"]).strip()
+    data["artist_en"] = (data.get("artist_en") or data["artist"]).strip()
+    return data
+
+
+# --------------- جستجوی وب (رایگان، بدون کلید) ---------------
+def web_search(query, max_results=4):
+    """با DuckDuckGo جستجو می‌کند. بهترین‌تلاش؛ اگر شکست خورد لیست خالی برمی‌گرداند."""
+    try:
+        try:
+            from ddgs import DDGS
+        except ImportError:
+            from duckduckgo_search import DDGS
+        results = list(DDGS().text(query, max_results=max_results))
+        return [
+            {"title": r.get("title", ""), "body": r.get("body", "")}
+            for r in results
+        ]
+    except Exception as e:
+        print(f"[web] جستجو ناموفق برای «{query}»: {e}", file=sys.stderr)
+        return []
+
+
+# --------------- داستان واقعی، گراندد روی نتایج وب ---------------
+def research_story(title, artist):
+    """
+    اول وب را درباره‌ی داستانِ آهنگ می‌گردد، سپس داستان را «فقط» بر اساس همان نتایج
+    می‌نویسد. اگر داستان واقعی پیدا نشد، یک متن احساسی کوتاه می‌نویسد.
+    """
+    queries = [
+        f"{artist} {title} داستان پشت آهنگ",
+        f"{artist} {title} ماجرای آهنگ معنی",
+        f"{artist} {title} song story behind meaning",
+    ]
+    snippets = []
+    for q in queries:
+        for r in web_search(q, max_results=4):
+            line = f"- {r['title']}: {r['body']}".strip()
+            if line and line not in snippets:
+                snippets.append(line)
+        if len(snippets) >= 10:
+            break
+
+    snippets_text = "\n".join(snippets[:12]) if snippets else "(نتیجه‌ای یافت نشد)"
+    print(f"[web] {len(snippets)} نتیجه برای داستان پیدا شد")
+
+    system = (
+        f"تو یک نویسنده‌ی موسیقی هستی و به زبان {STORY_LANGUAGE} می‌نویسی. "
+        "بر اساس «فقط» نتایج جستجوی وبی که داده می‌شود تصمیم بگیر: "
+        "اگر داستان واقعی و مستندی پشت این آهنگ هست (ماجرای ساخت، الهام، معنی "
+        "واقعی ترانه و...)، آن را در ۴ تا ۶ خط با لحنی گرم، طبیعی و انسانی (نه رباتی و نه خشک) "
+        "روایت کن و has_real_story=true بگذار. "
+        "داستانِ واقعی را طوری شروع کن که بتواند به‌صورت روان بعد از عبارتِ «داستان این آهنگ از "
+        "این قراره که» بیاید (یعنی ادامه‌ی جمله باشد و با تکرارِ نام آهنگ شروع نشود). "
+        "اگر نتایج، داستانِ واقعیِ روشنی ندارند، has_real_story=false بگذار و یک متن کوتاه و "
+        "خودمانی بنویس (۲ تا ۳ خط) که حسِ آهنگ را به یک «موقعیت یا حالِ ملموسِ زندگی» وصل کند؛ "
+        "طوری که مخاطب با خودش بگوید «دقیقاً همینه، انگار از حال من نوشته». مثل اینکه یک دوست "
+        "صمیمی آهنگ را معرفی می‌کند. نمونه‌ی لحن: «این آهنگ برای وقتاییه که هیچ‌کس درکت نمی‌کنه و "
+        "از همه‌چی زده شدی» یا «بذارش برای شب‌هایی که دلت یه نفرو می‌خواد که نیست». فارسیِ "
+        "محاوره‌ای، طبیعی و انسانی بنویس؛ نه شاعرانه‌ی مصنوعی، نه کلیشه‌ای، نه رباتی. "
+        "هرگز از دانش بیرونی یا حدس استفاده نکن و هیچ چیز را از خودت به‌عنوان واقعیت جا نزن. "
+        "نام آهنگ و خواننده را داخل متن تکرار نکن (جداگانه می‌آید). حداکثر ۱ تا ۲ ایموجی."
+    )
+    user = (
+        f"آهنگ: «{title}» از «{artist}».\n\n"
+        f"نتایج جستجوی وب:\n{snippets_text}\n\n"
+        'خروجی را فقط JSON بده: {"has_real_story": true یا false, "story": "..."}'
+    )
+    raw = ai_chat(system, user, max_tokens=600, temperature=0.7, json_mode=True)
+    data = parse_json(raw)
+    data["has_real_story"] = bool(data.get("has_real_story"))
+    data["story"] = (data.get("story") or "").strip()
+    if not data["story"]:
+        data["has_real_story"] = False
+        data["story"] = "همین حالا گوشش کن؛ بعضی آهنگ‌ها را باید شنید، نه توضیح داد. 🎧"
+    return data
+
+
+# ------------------------ ست‌کردن متادیتای فایل ------------------------
+def set_file_tags(mp3_path, title, artist, album):
+    """عنوان/خواننده/آلبومِ فایل mp3 را تنظیم می‌کند (در پلیر تلگرام دیده می‌شود)."""
+    try:
+        try:
+            tags = EasyID3(str(mp3_path))
+        except ID3NoHeaderError:
+            audio = MP3(str(mp3_path))
+            audio.add_tags()
+            audio.save()
+            tags = EasyID3(str(mp3_path))
+        tags["title"] = title
+        tags["artist"] = artist
+        tags["album"] = album
+        tags.save()
+    except Exception as e:
+        print(f"[tags] هشدار: ست‌کردن متادیتا نشد: {e}", file=sys.stderr)
+
+
+# ------------------------ ارسال به تلگرام ------------------------
+def send_audio(mp3_path, title, performer, caption):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendAudio"
+    with open(mp3_path, "rb") as f:
+        files = {"audio": f}
+        data = {
+            "chat_id": TELEGRAM_CHANNEL_ID,
+            "title": title,
+            "performer": performer,
+            "caption": caption[:1024],
+            "parse_mode": "HTML",
+        }
+        r = requests.post(url, data=data, files=files, timeout=180)
+    if not r.ok:
+        raise RuntimeError(f"ارسال صوت به تلگرام شکست خورد: {r.text}")
+    return r.json()
+
+
+def send_message(text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    r = requests.post(
+        url,
+        data={"chat_id": TELEGRAM_CHANNEL_ID, "text": text[:4096], "parse_mode": "HTML"},
+        timeout=60,
+    )
+    if not r.ok:
+        raise RuntimeError(f"ارسال پیام به تلگرام شکست خورد: {r.text}")
+
+
+# ------------------------ اجرای اصلی ------------------------
+MAX_SONG_ATTEMPTS = 4  # اگر آهنگی دانلود نشد، چند آهنگ دیگر امتحان کن
+
+
+def main():
+    history = load_history()
+
+    mp3 = None
+    info = None
+    seed = None
+    tried = []
+    for i in range(MAX_SONG_ATTEMPTS):
+        seed = choose_song(history, avoid=tried)
+        label = f"{seed['artist']} - {seed['title']}"
+        print(f"🎯 ({i + 1}/{MAX_SONG_ATTEMPTS}) جستجو برای: {label}")
+        try:
+            mp3, info = download_song(seed["search_query"])
+            print(f"⬇️  دانلود شد: {mp3.name} | عنوان واقعی: {info.get('title')}")
+            break
+        except RuntimeError as e:
+            print(f"⚠️  این آهنگ دانلود نشد: {e}", file=sys.stderr)
+            print("🔁 یک آهنگ دیگر انتخاب می‌کنم...", file=sys.stderr)
+            tried.append(label.lower())
+            mp3 = None
+
+    if not mp3 or not info:
+        raise RuntimeError("بعد از چند تلاش، هیچ آهنگی قابل دانلود نبود.")
+
+    # شناساییِ آهنگِ واقعی بر اساس عنوانِ همان فایلی که دانلود شد
+    track = describe_track(
+        info.get("title", ""),
+        info.get("artist", ""),
+        seed["search_query"],
+    )
+    print(f"🎼 شناسایی شد: {track['artist']} — {track['title']}")
+
+    # داستان: اول وب را می‌گردیم، بعد فقط بر اساس نتایجِ واقعی می‌نویسیم
+    research = research_story(track["title"], track["artist"])
+    if research["has_real_story"]:
+        track["story"] = f"📖 داستان این آهنگ از این قراره که {research['story']}"
+        print("📖 داستان واقعی (از روی نتایج وب) نوشته شد")
+    else:
+        track["story"] = research["story"]
+        print("✍️  داستان واقعی پیدا نشد؛ متن احساسی نوشته شد")
+
+    # نام انگلیسی برای متادیتای فایل + گذاشتن آیدی کانال کنار نام آهنگ
+    title_en = track["title_en"]
+    artist_en = track["artist_en"]
+    file_title = f"{title_en} | {CHANNEL_ID}"
+    set_file_tags(mp3, file_title, artist_en, CHANNEL_TAG)
+
+    title = html.escape(track["title"])
+    artist = html.escape(track["artist"])
+    story_safe = html.escape(track["story"])
+    tag_safe = html.escape(CHANNEL_TAG)
+
+    # چیدمان جدید: اسم خواننده/آهنگِ بولد بالا → داستان در کوتِ کلپس‌شده → تگ کانالِ بولد
+    caption = (
+        f"<b>🎵 {artist} — {title}</b>\n\n"
+        f"<blockquote expandable>{story_safe}</blockquote>\n\n"
+        f"<b>{tag_safe}</b>"
+    )
+
+    if len(caption) <= 1024:
+        send_audio(mp3, file_title, artist_en, caption)
+    else:
+        # حالت نادر (داستان خیلی بلند): آهنگ با سرتیتر+تگ، داستان در پیام جدا
+        short_caption = f"<b>🎵 {artist} — {title}</b>\n\n<b>{tag_safe}</b>"
+        send_audio(mp3, file_title, artist_en, short_caption)
+        send_message(f"<blockquote expandable>{story_safe}</blockquote>")
+    print("📨 ارسال شد به کانال")
+
+    key = f"{track['artist']} - {track['title']}".lower()
+    history.append(
+        {
+            "key": key,
+            "title": track["title"],
+            "artist": track["artist"],
+            "date": time.strftime("%Y-%m-%d"),
+        }
+    )
+    save_history(history)
+    print("✅ تمام شد")
+
+
+if __name__ == "__main__":
+    main()
