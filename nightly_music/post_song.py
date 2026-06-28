@@ -14,11 +14,13 @@ import re
 import subprocess
 import sys
 import time
+import hashlib
 from pathlib import Path
 
 import requests
 from google import genai
 from google.genai import types
+from Crypto.Cipher import Blowfish
 from mutagen.easyid3 import EasyID3
 from mutagen.id3 import ID3NoHeaderError
 from mutagen.mp3 import MP3
@@ -27,6 +29,7 @@ from mutagen.mp3 import MP3
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
+DEEZER_ARL = os.environ.get("DEEZER_ARL", "").strip()
 
 AI_MODEL = os.environ.get("AI_MODEL", "gemini-2.5-flash")
 STORY_LANGUAGE = os.environ.get("STORY_LANGUAGE", "Persian (Farsi)")
@@ -146,14 +149,25 @@ def choose_song(history, avoid=None):
 # ------------------------ دانلود آهنگ (ماژولار) ------------------------
 def download_song(query):
     """
-    آهنگ را به mp3 دانلود می‌کند (اول ساندکلاد، بعد یوتیوب) و کاور + متادیتا
-    را داخل فایل جاسازی می‌کند.
-    اگر خواستی بعداً از پایپلاین خودِ DezAlty (Deezer) استفاده کنی، فقط همین
-    تابع را عوض کن (کافی است مسیر یک فایل mp3 معتبر را برگردانی).
+    آهنگ کامل را به mp3 دانلود می‌کند.
+    اولویت: ۱) Deezer (پایدار، آهنگ کامل، بدون بلاکِ بات)  ۲) ساندکلاد  ۳) یوتیوب.
+    خروجی: (مسیر فایل mp3، dict متادیتای واقعی).
     """
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     for f in DOWNLOAD_DIR.glob("*"):
         f.unlink()
+
+    # ۱) Deezer — منبع اصلی
+    if DEEZER_ARL:
+        try:
+            mp3, info = deezer_download(query)
+            dur = _duration(mp3)
+            if dur >= MIN_DURATION:
+                print(f"[download] ✅ موفق با: Deezer ({int(dur)} ثانیه)")
+                return mp3, info
+            print(f"[download] ⚠️ Deezer فایل ناقص داد ({int(dur)}s) — منبع بعدی", file=sys.stderr)
+        except Exception as e:
+            print(f"[download] ❌ Deezer: {e} — منبع بعدی...", file=sys.stderr)
 
     out_template = str(DOWNLOAD_DIR / "track.%(ext)s")
 
@@ -176,8 +190,7 @@ def download_song(query):
     ]
     yt_common = common + cookies_args
 
-    # ساندکلاد را اول امتحان می‌کنیم چون مشکل بات/جاوااسکریپت ندارد و سریع است.
-    # یوتیوب فقط به‌عنوان پشتیبان (روی سرور گیت‌هاب اغلب توسط یوتیوب محدود می‌شود).
+    # ۲) ساندکلاد و ۳) یوتیوب — پشتیبان
     strategies = [
         ("ساندکلاد", common + [f"scsearch1:{query}"]),
         ("یوتیوب default", yt_common + ["--extractor-args", "youtube:player_client=default,-tv", f"ytsearch1:{query}"]),
@@ -203,6 +216,121 @@ def download_song(query):
 
     print(last_output, file=sys.stderr)
     raise RuntimeError("نسخه‌ی کاملِ آهنگ از هیچ منبعی پیدا نشد (فقط پیش‌نمایش/خطا).")
+
+
+# ------------------------ دانلود از Deezer ------------------------
+DEEZER_SECRET = b"g4el58wc0zvf9na1"
+DEEZER_GW = "https://www.deezer.com/ajax/gw-light.php"
+
+
+def _deezer_session():
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Accept-Language": "en-US,en;q=0.9",
+    })
+    s.cookies.set("arl", DEEZER_ARL, domain=".deezer.com")
+    r = s.get(DEEZER_GW, params={
+        "method": "deezer.getUserData", "input": "3",
+        "api_version": "1.0", "api_token": "",
+    }, timeout=30).json()
+    res = r.get("results", {}) or {}
+    user = res.get("USER", {}) or {}
+    if not user.get("USER_ID"):
+        raise RuntimeError("ARL نامعتبر/منقضی است (لاگین Deezer نشد)")
+    api_token = res.get("checkForm")
+    license_token = (user.get("OPTIONS", {}) or {}).get("license_token")
+    return s, api_token, license_token
+
+
+def _deezer_key(sng_id):
+    md5 = hashlib.md5(str(sng_id).encode()).hexdigest()
+    return bytes(ord(md5[i]) ^ ord(md5[i + 16]) ^ DEEZER_SECRET[i] for i in range(16))
+
+
+def _deezer_decrypt(resp, out_path, sng_id):
+    key = _deezer_key(sng_id)
+    iv = bytes(range(8))  # 0,1,2,...,7
+    with open(out_path, "wb") as f:
+        for i, chunk in enumerate(resp.iter_content(2048)):
+            if not chunk:
+                break
+            if i % 3 == 0 and len(chunk) == 2048:
+                chunk = Blowfish.new(key, Blowfish.MODE_CBC, iv).decrypt(chunk)
+            f.write(chunk)
+
+
+def _deezer_embed(mp3_path, title, artist, cover_url):
+    from mutagen.id3 import ID3, APIC, TIT2, TPE1
+    try:
+        tags = ID3(str(mp3_path))
+    except Exception:
+        tags = ID3()
+    if cover_url:
+        try:
+            img = requests.get(cover_url, timeout=30).content
+            tags.delall("APIC")
+            tags.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=img))
+        except Exception:
+            pass
+    tags.add(TIT2(encoding=3, text=title))
+    tags.add(TPE1(encoding=3, text=artist))
+    tags.save(str(mp3_path))
+
+
+def deezer_download(query):
+    """آهنگ کامل را از Deezer می‌گیرد، رمزگشایی و کاور+تگ را جاسازی می‌کند."""
+    if not DEEZER_ARL:
+        raise RuntimeError("DEEZER_ARL تنظیم نشده")
+
+    # جستجوی عمومی برای پیدا کردن track id و متادیتای تمیز
+    sr = requests.get("https://api.deezer.com/search",
+                      params={"q": query, "limit": 1}, timeout=30).json()
+    data = sr.get("data") or []
+    if not data:
+        raise RuntimeError("آهنگ در Deezer پیدا نشد")
+    track = data[0]
+    sng_id = track["id"]
+    title = track.get("title") or ""
+    artist = (track.get("artist") or {}).get("name", "")
+    album = track.get("album") or {}
+    cover_url = album.get("cover_xl") or album.get("cover_big") or album.get("cover_medium")
+
+    s, api_token, license_token = _deezer_session()
+
+    # دریافت TRACK_TOKEN
+    pr = s.post(DEEZER_GW, params={
+        "method": "deezer.pageTrack", "input": "3",
+        "api_version": "1.0", "api_token": api_token,
+    }, json={"sng_id": sng_id}, timeout=30).json()
+    tdata = (pr.get("results") or {}).get("DATA") or {}
+    track_token = tdata.get("TRACK_TOKEN")
+    if not track_token:
+        raise RuntimeError("TRACK_TOKEN دریافت نشد")
+
+    # دریافت لینک مدیا (MP3 128)
+    mr = s.post("https://media.deezer.com/v1/get_url", json={
+        "license_token": license_token,
+        "media": [{"type": "FULL", "formats": [
+            {"cipher": "BF_CBC_STRIPE", "format": "MP3_128"}]}],
+        "track_tokens": [track_token],
+    }, timeout=30).json()
+    try:
+        url = mr["data"][0]["media"][0]["sources"][0]["url"]
+    except (KeyError, IndexError, TypeError):
+        raise RuntimeError("لینک دانلود Deezer در دسترس نیست (شاید در کشورِ اکانت موجود نیست)")
+
+    out_path = DOWNLOAD_DIR / "track.mp3"
+    with s.get(url, stream=True, timeout=180) as resp:
+        resp.raise_for_status()
+        _deezer_decrypt(resp, out_path, sng_id)
+
+    try:
+        _deezer_embed(out_path, title, artist, cover_url)
+    except Exception as e:
+        print(f"[deezer] هشدار: جاسازی کاور/تگ نشد: {e}", file=sys.stderr)
+
+    return out_path, {"title": title, "artist": artist}
 
 
 def _duration(mp3_path):
