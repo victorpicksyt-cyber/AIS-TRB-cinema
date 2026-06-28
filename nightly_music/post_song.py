@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 هر شب یک آهنگ هوشمند انتخاب می‌کند، فایل کامل آن را دانلود می‌کند،
-یک داستان احساسی پشت موسیقی می‌نویسد و همه را در کانال تلگرام می‌فرستد.
+داستان آهنگ را (با جستجوی گوگلِ گراندشده) می‌نویسد و همه را در کانال تلگرام می‌فرستد.
 
-موتور هوش مصنوعی: GitHub Models (رایگان، با همان توکن گیت‌هاب)
+موتور هوش مصنوعی: Google Gemini (تیر رایگان) با جستجوی گوگلِ داخلی برای داستان واقعی.
 """
 
 import html
@@ -17,19 +17,19 @@ import time
 from pathlib import Path
 
 import requests
-from openai import OpenAI
+from google import genai
+from google.genai import types
 from mutagen.easyid3 import EasyID3
 from mutagen.id3 import ID3NoHeaderError
 from mutagen.mp3 import MP3
 
 # ---------------------------- تنظیمات ----------------------------
-GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
 
-AI_MODEL = os.environ.get("AI_MODEL", "openai/gpt-4o")
+AI_MODEL = os.environ.get("AI_MODEL", "gemini-2.5-flash")
 STORY_LANGUAGE = os.environ.get("STORY_LANGUAGE", "Persian (Farsi)")
-MODELS_ENDPOINT = "https://models.github.ai/inference"
 
 # تگ کانال که هم در فیلد آلبومِ فایل و هم در آخر پیام می‌آید
 CHANNEL_TAG = "@RadioBulletin |  رادیو بولتن"
@@ -40,27 +40,38 @@ DOWNLOAD_DIR = Path("/tmp/song")
 MAX_HISTORY = 200  # چند آهنگ آخر را به هوش مصنوعی بدهیم تا تکرار نشود
 MIN_DURATION = 90  # ثانیه؛ فایل کوتاه‌تر = پیش‌نمایش، نه آهنگ کامل
 
-client = OpenAI(base_url=MODELS_ENDPOINT, api_key=GITHUB_TOKEN)
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 # ------------------------ ابزار هوش مصنوعی ------------------------
-def ai_chat(system, user, max_tokens=900, temperature=0.9, json_mode=False, retries=4):
-    """یک درخواست به GitHub Models با backoff برای محدودیت نرخ (rate limit)."""
+def ai_chat(system, user, max_tokens=900, temperature=0.9,
+            json_mode=False, grounded=False, retries=4):
+    """
+    یک درخواست به Gemini با backoff.
+    grounded=True → از جستجوی گوگلِ داخلیِ Gemini استفاده می‌کند (برای داستان واقعی).
+    json_mode=True → خروجی را به‌صورت JSON می‌خواهد (با grounded ترکیب نمی‌شود).
+    """
+    cfg = dict(
+        system_instruction=system,
+        temperature=temperature,
+        max_output_tokens=max_tokens,
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
+    )
+    if grounded:
+        cfg["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+    elif json_mode:
+        cfg["response_mime_type"] = "application/json"
+    config = types.GenerateContentConfig(**cfg)
+
     for attempt in range(retries):
         try:
-            kwargs = dict(
-                model=AI_MODEL,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                temperature=temperature,
-                max_tokens=max_tokens,
+            resp = client.models.generate_content(
+                model=AI_MODEL, contents=user, config=config,
             )
-            if json_mode:
-                kwargs["response_format"] = {"type": "json_object"}
-            resp = client.chat.completions.create(**kwargs)
-            return resp.choices[0].message.content.strip()
+            text = (resp.text or "").strip()
+            if not text:
+                raise RuntimeError("پاسخ خالی از مدل")
+            return text
         except Exception as e:
             wait = (2 ** attempt) * 5
             print(f"[AI] خطا (تلاش {attempt + 1}): {e} — {wait}s صبر...", file=sys.stderr)
@@ -69,10 +80,14 @@ def ai_chat(system, user, max_tokens=900, temperature=0.9, json_mode=False, retr
 
 
 def parse_json(raw):
-    """JSON را حتی اگر داخل ```fence``` باشد می‌خواند."""
+    """JSON را حتی اگر داخل ```fence``` یا لای متنِ اضافه باشد می‌خواند."""
     raw = raw.strip()
     raw = re.sub(r"^```(json)?", "", raw).strip()
     raw = re.sub(r"```$", "", raw).strip()
+    if not raw.startswith("{"):
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if m:
+            raw = m.group(0)
     return json.loads(raw)
 
 
@@ -99,9 +114,13 @@ def choose_song(history, avoid=None):
         recent = recent + list(avoid)
     system = (
         "تو یک کیوریتور موسیقی حرفه‌ای برای یک کانال تلگرامی با مخاطب ایرانی هستی. "
-        "اولویت اولت: آهنگی پیشنهاد بده که پشتش یک «داستان واقعی و مستندِ جذاب» وجود دارد "
-        "(ماجرای ساختش، اتفاقی که الهام‌بخشش بوده و...). اگر آهنگِ تازه‌ای با داستان واقعی "
-        "پیدا نکردی یا همه قبلاً فرستاده شده‌اند، یک آهنگ ترند/محبوب/باب میل مخاطب ایرانی بده. "
+        "آهنگ را با این اولویت انتخاب کن: "
+        "اولویت اول — آهنگی که پشتش یک «داستان واقعی و مستندِ جذاب» وجود دارد "
+        "(ماجرای ساختش، اتفاقی که الهام‌بخشش بوده، معنی واقعی ترانه و...). "
+        "اولویت دوم — اگر آهنگِ تازه‌ای با داستان واقعی پیدا نکردی، آهنگی انتخاب کن که به‌شدت "
+        "یک «حال یا موقعیتِ خاصِ زندگی» را تداعی می‌کند و وابستگیِ حسی می‌آورد — یعنی از آن "
+        "آهنگ‌هایی که آدم‌ها در لحظه‌های خاص (دلتنگی، دل‌شکستگی، نوستالژی، سرخوشی و...) گوش می‌دهند "
+        "و حس می‌کنند «انگار از حال من نوشته شده». "
         "آهنگ‌های واقعی و شناخته‌شده انتخاب کن که در سرویس‌های موسیقی پیدا می‌شوند. "
         "ترکیبی متنوع از فارسی و بین‌المللی. آهنگ‌های لیست «انتخاب نکن» را تکرار نکن."
     )
@@ -247,72 +266,61 @@ def describe_track(real_title, real_artist_hint, seed):
     return data
 
 
-# --------------- جستجوی وب (رایگان، بدون کلید) ---------------
-def web_search(query, max_results=4):
-    """با DuckDuckGo جستجو می‌کند. بهترین‌تلاش؛ اگر شکست خورد لیست خالی برمی‌گرداند."""
+# --------------- داستان، گراندد با جستجوی گوگلِ داخلیِ Gemini ---------------
+def _emotional_fallback(title, artist):
+    """متن احساسیِ خودمانی، بدون نیاز به جستجو (پشتیبان)."""
+    system = (
+        f"تو به زبان {STORY_LANGUAGE} و خیلی خودمانی می‌نویسی. برای یک آهنگ، یک متن کوتاه "
+        "(۲ تا ۳ خط) بنویس که حسِ آهنگ را به یک «موقعیت یا حالِ ملموسِ زندگی» وصل کند، طوری "
+        "که مخاطب بگوید «دقیقاً همینه، انگار از حال من نوشته». مثل وقتی یک دوست صمیمی آهنگ را "
+        "معرفی می‌کند. نمونه‌ی لحن: «این آهنگ برای وقتاییه که هیچ‌کس درکت نمی‌کنه و از همه‌چی "
+        "زده شدی». فارسیِ محاوره‌ای و طبیعی، نه شاعرانه‌ی مصنوعی و نه رباتی. ۱ تا ۲ ایموجی. "
+        "نام آهنگ/خواننده را تکرار نکن. فقط خودِ متن را بنویس."
+    )
+    user = f"آهنگ: «{title}» از «{artist}». یک متن کوتاه و خودمانی بنویس."
     try:
-        try:
-            from ddgs import DDGS
-        except ImportError:
-            from duckduckgo_search import DDGS
-        results = list(DDGS().text(query, max_results=max_results))
-        return [
-            {"title": r.get("title", ""), "body": r.get("body", "")}
-            for r in results
-        ]
-    except Exception as e:
-        print(f"[web] جستجو ناموفق برای «{query}»: {e}", file=sys.stderr)
-        return []
+        txt = ai_chat(system, user, max_tokens=200, temperature=0.95)
+        if txt.strip():
+            return txt.strip()
+    except Exception:
+        pass
+    return "همین حالا گوشش کن؛ بعضی آهنگ‌ها رو باید شنید، نه توضیح داد. 🎧"
 
 
-# --------------- داستان واقعی، گراندد روی نتایج وب ---------------
 def research_story(title, artist):
     """
-    اول وب را درباره‌ی داستانِ آهنگ می‌گردد، سپس داستان را «فقط» بر اساس همان نتایج
-    می‌نویسد. اگر داستان واقعی پیدا نشد، یک متن احساسی کوتاه می‌نویسد.
+    با جستجوی گوگلِ داخلیِ Gemini درباره‌ی آهنگ تحقیق می‌کند و داستان را فقط بر اساس
+    یافته‌های واقعی می‌نویسد. اگر داستان واقعی پیدا نشد، متن احساسیِ خودمانی برمی‌گرداند.
     """
-    queries = [
-        f"{artist} {title} داستان پشت آهنگ",
-        f"{artist} {title} ماجرای آهنگ معنی",
-        f"{artist} {title} song story behind meaning",
-    ]
-    snippets = []
-    for q in queries:
-        for r in web_search(q, max_results=4):
-            line = f"- {r['title']}: {r['body']}".strip()
-            if line and line not in snippets:
-                snippets.append(line)
-        if len(snippets) >= 10:
-            break
-
-    snippets_text = "\n".join(snippets[:12]) if snippets else "(نتیجه‌ای یافت نشد)"
-    print(f"[web] {len(snippets)} نتیجه برای داستان پیدا شد")
-
     system = (
         f"تو یک نویسنده‌ی موسیقی هستی و به زبان {STORY_LANGUAGE} می‌نویسی. "
-        "بر اساس «فقط» نتایج جستجوی وبی که داده می‌شود تصمیم بگیر: "
-        "اگر داستان واقعی و مستندی پشت این آهنگ هست (ماجرای ساخت، الهام، معنی "
-        "واقعی ترانه و...)، آن را در ۴ تا ۶ خط گرم و گیرا روایت کن و has_real_story=true بگذار. "
-        "داستانِ واقعی را طوری شروع کن که بتواند به‌صورت روان بعد از عبارتِ «داستان این آهنگ از "
-        "این قراره که» بیاید (یعنی ادامه‌ی جمله باشد و با تکرارِ نام آهنگ شروع نشود). "
-        "اگر نتایج داستانِ واقعیِ روشنی ندارند، has_real_story=false بگذار و یک متن کوتاهِ "
-        "احساسی (حداکثر ۳ خط) بنویس که شنونده را به شنیدن آهنگ مشتاق کند. "
-        "هرگز از دانش بیرونی یا حدس استفاده نکن و هیچ چیز را از خودت به‌عنوان واقعیت جا نزن. "
-        "نام آهنگ و خواننده را داخل متن تکرار نکن (جداگانه می‌آید). حداکثر ۱ تا ۲ ایموجی."
+        "ابتدا با جستجوی گوگل درباره‌ی این آهنگ تحقیق کن. "
+        "اگر داستانِ واقعی و مستندی پشتش پیدا کردی (ماجرای ساخت، الهام، معنی واقعی ترانه و...)، "
+        "آن را در ۴ تا ۶ خط با لحنی گرم، طبیعی و انسانی (نه رباتی و نه خشک) روایت کن و "
+        "has_real_story=true بگذار. داستان را طوری شروع کن که روان بعد از عبارتِ «داستان این "
+        "آهنگ از این قراره که» بیاید (ادامه‌ی جمله باشد و با تکرارِ نام آهنگ شروع نشود). "
+        "اگر با جستجو داستانِ واقعیِ روشنی پیدا نکردی، has_real_story=false بگذار و یک متن کوتاه "
+        "و خودمانی (۲ تا ۳ خط) بنویس که حسِ آهنگ را به یک موقعیتِ ملموسِ زندگی وصل کند، طوری که "
+        "مخاطب بگوید «دقیقاً همینه». نمونه: «این آهنگ برای وقتاییه که هیچ‌کس درکت نمی‌کنه». "
+        "فارسیِ محاوره‌ای و طبیعی، نه کلیشه‌ای. هرگز چیزی از خودت به‌عنوان واقعیت جا نزن. "
+        "نام آهنگ و خواننده را داخل متن تکرار نکن. حداکثر ۱ تا ۲ ایموجی. "
+        'فقط و فقط یک JSON خروجی بده: {"has_real_story": true/false, "story": "..."}'
     )
     user = (
-        f"آهنگ: «{title}» از «{artist}».\n\n"
-        f"نتایج جستجوی وب:\n{snippets_text}\n\n"
-        'خروجی را فقط JSON بده: {"has_real_story": true یا false, "story": "..."}'
+        f"آهنگ: «{title}» از «{artist}».\n"
+        "درباره‌ی داستان و معنی واقعیِ این آهنگ در گوگل جستجو کن و طبق دستور JSON بده."
     )
-    raw = ai_chat(system, user, max_tokens=600, temperature=0.7, json_mode=True)
-    data = parse_json(raw)
-    data["has_real_story"] = bool(data.get("has_real_story"))
-    data["story"] = (data.get("story") or "").strip()
-    if not data["story"]:
-        data["has_real_story"] = False
-        data["story"] = "همین حالا گوشش کن؛ بعضی آهنگ‌ها را باید شنید، نه توضیح داد. 🎧"
-    return data
+    try:
+        raw = ai_chat(system, user, max_tokens=1200, temperature=0.7, grounded=True)
+        data = parse_json(raw)
+        data["has_real_story"] = bool(data.get("has_real_story"))
+        data["story"] = (data.get("story") or "").strip()
+        if data["story"]:
+            return data
+    except Exception as e:
+        print(f"[story] گراندینگ ناموفق: {e} — متن احساسی جایگزین می‌شود", file=sys.stderr)
+
+    return {"has_real_story": False, "story": _emotional_fallback(title, artist)}
 
 
 # ------------------------ ست‌کردن متادیتای فایل ------------------------
