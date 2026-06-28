@@ -5,7 +5,6 @@ on:
 
 permissions:
   contents: write   # برای ذخیره‌ی تاریخچه‌ی آهنگ‌ها در ریپو
-  models: read      # برای استفاده از GitHub Models (هوش مصنوعی رایگان گیت‌هاب)
 
 jobs:
   post:
@@ -34,11 +33,11 @@ jobs:
 
       - name: Post nightly song
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
           YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
-          AI_MODEL: "openai/gpt-4.1"
+          AI_MODEL: "gemini-2.5-flash"
           STORY_LANGUAGE: "Persian (Farsi)"
         run: python nightly_music/post_song.py
 
