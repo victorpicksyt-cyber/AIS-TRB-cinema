@@ -36,6 +36,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          DEEZER_ARL: ${{ secrets.DEEZER_ARL }}
           YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
           AI_MODEL: "gemini-2.5-flash"
           STORY_LANGUAGE: "Persian (Farsi)"
